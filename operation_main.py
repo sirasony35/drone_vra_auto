@@ -11,25 +11,23 @@ import os
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
-from scipy.ndimage import gaussian_filter, generic_filter
+from scipy.signal import convolve2d  # 정밀 제어를 위해 signal convolve 사용
 
 # ======================================================
-# 0. 설정 (Pix4D "Fine" Default 완벽 재현)
+# 0. 설정 (Pix4D Red Edge Fix)
 # ======================================================
 GNDVI_PATH = "test_data/GJR1_02_250724_GNDVI.tif"
 BOUNDARY_ZIP_PATH = "test_data/GJR1_02_250724_Boundary.zip"
-OUTPUT_FOLDER = "result_pix4d_final_v7"
+OUTPUT_FOLDER = "result_pix4d_edge_fix"
 
 GRID_SIZE = 1.0
 N_ZONES = 5
 
-# [최종 튜닝 값] 스무딩 강도 (Sigma)
-# Uniform 3.0은 너무 강했고(Coarse), 0은 너무 거칠었습니다(Raw).
-# 0.8은 주변 값을 살짝만 참고하여, 빨간색 영역을 적당히 남기면서 노이즈만 잡습니다.
-SMOOTHING_SIGMA = 0.8
+# [스무딩 크기] 3x3 (Pix4D Fine/Normal 유사)
+# 이 값을 3으로 하면 픽셀이 살아있고, 5로 하면 좀 더 뭉개집니다.
+SMOOTHING_KERNEL_SIZE = 3
 
-# [청소] 다수결 필터 (필수)
-# Pix4D 이미지는 픽셀 단위지만 '외톨이 점'이 없습니다. Size 3으로 정리합니다.
+# [다수결 필터] 3x3 (깔끔하게 정리)
 MAJORITY_FILTER_SIZE = 3
 
 
@@ -108,37 +106,54 @@ def calculate_zonal_stats(grid_gdf, raster_path, col_name='Raw_Value'):
 
 
 # ======================================================
-# 3. [복귀] Gaussian 스무딩 (Sigma 0.8)
+# 3. [완벽 수정] Edge-Safe Normalized Smoothing
 # ======================================================
-def apply_grid_smoothing(grid_gdf, value_col, sigma=0.8):
+def apply_edge_safe_smoothing(grid_gdf, value_col, kernel_size=3):
     """
-    Gaussian Filter with Sigma=0.8
-    - Uniform(Size=3)보다 약하고, Raw(Size=0)보다는 부드러운 'Fine' 상태를 구현합니다.
+    불규칙한 경계면(Edge)에서 값이 떨어지는 현상을 수학적으로 완벽하게 방지하는 함수입니다.
+    (Sum of Values) / (Count of Valid Neighbors) 방식을 사용합니다.
     """
-    print(f"  [Algorithm] Grid Matrix Gaussian Smoothing (Sigma={sigma})...")
+    print(f"  [Algorithm] Edge-Safe Normalized Smoothing (Size={kernel_size})...")
+
+    # 1. 매트릭스 변환
     max_col = grid_gdf['mat_col'].max()
     max_row = grid_gdf['mat_row'].max()
 
-    matrix = np.full((max_row + 1, max_col + 1), np.nan)
+    # 데이터 매트릭스 (빈 곳은 0으로 채움 - 나중에 Count로 나눌 거라 괜찮음)
+    data_matrix = np.zeros((max_row + 1, max_col + 1))
+    # 마스크 매트릭스 (데이터가 있는 곳은 1, 없는 곳은 0)
+    mask_matrix = np.zeros((max_row + 1, max_col + 1))
+
     for _, row in grid_gdf.iterrows():
         r, c = int(row['mat_row']), int(row['mat_col'])
-        matrix[r, c] = row[value_col]
+        val = row[value_col]
+        if not np.isnan(val):
+            data_matrix[r, c] = val
+            mask_matrix[r, c] = 1
 
-    valid_mask = ~np.isnan(matrix)
-    if np.sum(valid_mask) == 0: return grid_gdf
+    # 2. 커널 생성 (모든 값이 1인 정사각형)
+    kernel = np.ones((kernel_size, kernel_size))
 
-    # 결측치 채우기
-    mean_val = np.nanmean(matrix)
-    filled_matrix = matrix.copy()
-    filled_matrix[~valid_mask] = mean_val
+    # 3. 컨볼루션 연산 (boundary='fill', fillvalue=0 중요!)
+    # 이웃들의 합계
+    neighbor_sum = convolve2d(data_matrix, kernel, mode='same', boundary='fill', fillvalue=0)
+    # 이웃들의 개수 (0인 곳은 제외됨)
+    neighbor_count = convolve2d(mask_matrix, kernel, mode='same', boundary='fill', fillvalue=0)
 
-    # [핵심] Gaussian Filter (mode='nearest')
-    smoothed_matrix = gaussian_filter(filled_matrix, sigma=sigma, mode='nearest')
+    # 4. 나누기 (정규화) - 개수가 0인 곳은 0으로 처리
+    with np.errstate(divide='ignore', invalid='ignore'):
+        smoothed_matrix = neighbor_sum / neighbor_count
+        smoothed_matrix[neighbor_count == 0] = np.nan  # 데이터 없던 곳은 다시 NaN
 
+    # 5. 결과 매핑
     smoothed_values = []
     for _, row in grid_gdf.iterrows():
         r, c = int(row['mat_row']), int(row['mat_col'])
         val = smoothed_matrix[r, c]
+
+        # 만약 결과가 NaN이면(고립된 점 등) 원본 값 유지
+        if np.isnan(val):
+            val = row[value_col]
         smoothed_values.append(val)
 
     grid_gdf['Smooth_Value'] = smoothed_values
@@ -146,11 +161,12 @@ def apply_grid_smoothing(grid_gdf, value_col, sigma=0.8):
 
 
 # ======================================================
-# 4. 다수결 필터 (Size 3 필수)
+# 4. 다수결 필터
 # ======================================================
 def apply_majority_filter_logical(grid_gdf, zone_col='Zone', size=3):
     if size <= 1: return grid_gdf
-    print(f"  [Post-Processing] 다수결 필터(Despeckle) 적용 (Size={size}x{size})...")
+    print(f"  [Post-Processing] Despeckle Filter (Size={size})...")
+
     max_col = grid_gdf['mat_col'].max()
     max_row = grid_gdf['mat_row'].max()
     matrix = np.zeros((max_row + 1, max_col + 1), dtype=int)
@@ -158,6 +174,7 @@ def apply_majority_filter_logical(grid_gdf, zone_col='Zone', size=3):
     for _, row in grid_gdf.iterrows():
         matrix[int(row['mat_row']), int(row['mat_col'])] = row[zone_col]
 
+    from scipy.ndimage import generic_filter
     def mode_func(values):
         valid_vals = values[values != 0]
         if len(valid_vals) == 0: return 0
@@ -203,10 +220,9 @@ def main():
 
     print(">>> 2. 원본 데이터 추출")
     grid = calculate_zonal_stats(grid, GNDVI_PATH, col_name='Raw_GNDVI')
-    # 결측치 제거
     raw_valid = grid.dropna(subset=['Raw_GNDVI'])
 
-    # [기준] Raw Data 기준
+    # [기준 산정] Raw Data 기준으로 Quantile 5등분 (이게 고정 기준!)
     print(">>> 3. 기준점(Bins) 계산 (Raw Quantile)")
     _, bins = pd.qcut(raw_valid['Raw_GNDVI'], q=N_ZONES, retbins=True, duplicates='drop')
     if len(bins) < N_ZONES + 1:
@@ -214,11 +230,14 @@ def main():
     print(f"  - Cutoffs: {np.round(bins, 4)}")
 
     # -----------------------------------------------------------
-    # [핵심] Gaussian 0.8 (적당한 뭉개짐)
+    # [핵심] 가장자리 안전 스무딩 (3x3 Uniform)
     # -----------------------------------------------------------
-    print(f">>> 4. 스무딩 적용 (Sigma={SMOOTHING_SIGMA})")
-    grid = apply_grid_smoothing(grid, value_col='Raw_GNDVI', sigma=SMOOTHING_SIGMA)
+    print(f">>> 4. 정규화 스무딩 적용 (Size={SMOOTHING_KERNEL_SIZE})")
+    grid = apply_edge_safe_smoothing(grid, value_col='Raw_GNDVI', kernel_size=SMOOTHING_KERNEL_SIZE)
 
+    # -----------------------------------------------------------
+    # [핵심] Raw 기준을 Smooth 데이터에 대입 -> 빨간색 희석 효과
+    # -----------------------------------------------------------
     print(">>> 5. 등급 부여 (Raw Cutoff -> Smooth Data)")
     grid['Zone'] = pd.cut(grid['Smooth_Value'], bins=bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
 
@@ -228,12 +247,12 @@ def main():
     grid['Zone'] = grid['Zone'].fillna(3).astype(int)
 
     # -----------------------------------------------------------
-    # [핵심] 다수결 3x3 (깔끔함)
+    # [마무리] 다수결 필터 (Size 3)
     # -----------------------------------------------------------
     grid = apply_majority_filter_logical(grid, zone_col='Zone', size=MAJORITY_FILTER_SIZE)
 
     # 저장
-    print("\n[최종 통계 - Pix4D True Fine Mode]")
+    print("\n[최종 통계 - Edge Fixed]")
     colors = ["Red", "Orange", "Yellow", "Lt.Green", "Green"]
     stats_df = grid.groupby('Zone')
     for z in range(1, N_ZONES + 1):
@@ -242,8 +261,7 @@ def main():
             pct = (len(g) / len(grid)) * 100
             print(f" Zone {z} ({colors[z - 1]}): {pct:.1f}% ({g.geometry.area.sum():.0f} m2)")
 
-    save_map_image(grid, os.path.join(OUTPUT_FOLDER, "Result_Pix4D_True_Fine.png"), "(Pix4D True Fine)",
-                   zone_col='Zone')
+    save_map_image(grid, os.path.join(OUTPUT_FOLDER, "Result_Pix4D_EdgeFix.png"), "(Pix4D Edge Fixed)", zone_col='Zone')
 
     grid_save = grid.rename(columns={'Smooth_Value': 'GNDVI_Sm', 'Raw_GNDVI': 'GNDVI_Rw'})
     save_cols = [c for c in grid_save.columns if c not in ['mat_col', 'mat_row']]
