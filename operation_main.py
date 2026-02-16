@@ -1,3 +1,5 @@
+import os
+import glob
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -7,61 +9,36 @@ from rasterio.io import MemoryFile
 from shapely.geometry import Polygon
 from shapely import affinity
 import math
-import os
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
-from scipy.ndimage import gaussian_filter, generic_filter
+from scipy.ndimage import gaussian_filter, generic_filter, binary_erosion
 from scipy.interpolate import NearestNDInterpolator
+import warnings
 
-# [경고 제거]
+# [모듈 Import] 바운더리 감지기 클래스 가져오기
+from boundary_detector import BoundaryDetector
+
+# 경고 및 옵션 설정
+warnings.filterwarnings("ignore")
 pd.set_option('future.no_silent_downcasting', True)
 
 # ======================================================
-# 0. 설정 (Pix4D Logic V30 - Clip First + Target Dist)
+# 0. 설정 (Pix4D Logic V38 - Edge Boosting + Auto Boundary)
 # ======================================================
-GNDVI_PATH = "test_data/GJR2_02_250724_GNDVI.tif"
-BOUNDARY_ZIP_PATH = "test_data/GJR2_02_250724_Boundary.zip"
-OUTPUT_FOLDER = "result_pix4d_v30_final"
+DATA_FOLDER = "test_data"
+OUTPUT_FOLDER = "result_final_auto"
 
 GRID_SIZE = 1.0
 N_ZONES = 5
-
-# [데이터 범위] -999 이상 (전체 범위 사용)
 VALID_THRESHOLD = -999.0
-
-# [스무딩 강도] Sigma 0.6 (디테일 유지)
-ZONE_DETAIL_SIGMA = 1.0
-
-# [다수결 필터]
-MAJORITY_FILTER_SIZE = 5
-
-# [최종 목표 분포] (Zone 1~5 비율 강제 적용)
-# Zone 1(8.5%), Zone 2(25%), Zone 3(33%), Zone 4(25%), Zone 5(8.5%)
-# 누적 비율 계산:
-# Z1 End: 0.085
-# Z2 End: 0.085 + 0.25 = 0.335
-# Z3 End: 0.335 + 0.33 = 0.665
-# Z4 End: 0.665 + 0.25 = 0.915
-# Z5 End: 1.0
-TARGET_QUANTILES = [0.0, 0.085, 0.335, 0.665, 0.915, 1.0]
+ZONE_DETAIL_SIGMA = 1.4  # V38 기준
+MAJORITY_FILTER_SIZE = 3
 
 
 # ======================================================
-# 1. 유틸리티 함수
+# 1. 유틸리티 및 분석 함수
 # ======================================================
-def load_boundary_from_zip(zip_path):
-    safe_path = zip_path.replace("\\", "/")
-    if not safe_path.startswith("zip://"): safe_path = f"zip://{safe_path}"
-    try:
-        gdf = gpd.read_file(safe_path)
-        if gdf.crs is None: gdf.crs = "EPSG:4326"
-        return gdf
-    except Exception as e:
-        print(f"Zip 로드 실패: {e}")
-        return None
-
-
 def get_main_angle(geometry):
     rect = geometry.minimum_rotated_rectangle
     coords = list(rect.exterior.coords)
@@ -99,44 +76,28 @@ def create_rotated_grid_with_indices(boundary_gdf, grid_size=1.0):
     grid_gdf = pd.concat([grid_gdf, idx_df], axis=1)
 
     grid_gdf['geometry'] = grid_gdf['geometry'].apply(lambda g: affinity.rotate(g, rotation_angle, origin=centroid))
-
     intersects_mask = grid_gdf.intersects(boundary_geom)
     filtered_grid = grid_gdf[intersects_mask].copy().reset_index(drop=True)
-
     return filtered_grid
 
 
-# ======================================================
-# 2. 래스터 클리핑 (메모리 저장)
-# ======================================================
 def clip_raster_to_boundary(raster_path, boundary_gdf):
-    print(">>> [Pre-Processing] Clipping Raster by Boundary...")
+    # print(">>> [Pre-Processing] Clipping Raster by Boundary...")
     with rasterio.open(raster_path) as src:
         if boundary_gdf.crs != src.crs:
             boundary_gdf = boundary_gdf.to_crs(src.crs)
-
         out_image, out_transform = mask(src, boundary_gdf.geometry, crop=True, nodata=np.nan)
-
         out_meta = src.meta.copy()
         out_meta.update({
-            "driver": "GTiff",
-            "height": out_image.shape[1],
-            "width": out_image.shape[2],
-            "transform": out_transform,
-            "nodata": np.nan,
-            "dtype": 'float32'
+            "driver": "GTiff", "height": out_image.shape[1], "width": out_image.shape[2],
+            "transform": out_transform, "nodata": np.nan, "dtype": 'float32'
         })
-
         memfile = MemoryFile()
         with memfile.open(**out_meta) as dataset:
             dataset.write(out_image)
-
         return memfile
 
 
-# ======================================================
-# 3. [Step 1] 1m Grid Mean
-# ======================================================
 def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
     stats = []
     with mem_raster.open() as src:
@@ -144,10 +105,7 @@ def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
             try:
                 out_image, _ = mask(src, [row['geometry']], crop=True)
                 data = out_image[0]
-
-                # 0값 및 NaN 제외
                 valid_data = data[(~np.isnan(data)) & (data > VALID_THRESHOLD) & (data != 0)]
-
                 if valid_data.size > 0:
                     stats.append(np.mean(valid_data))
                 else:
@@ -158,12 +116,8 @@ def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
     return grid_gdf
 
 
-# ======================================================
-# 4. [Step 2] Zone Detail (Smoothing)
-# ======================================================
 def apply_zone_detail_smoothing(grid_gdf, value_col, sigma=0.5):
-    print(f"  [Algorithm] Applying Zone Detail (Sigma={sigma})...")
-
+    # print(f"  [Algorithm] Applying Zone Detail (Sigma={sigma}, Strategy=EdgeBoosting)...")
     max_col = grid_gdf['mat_col'].max()
     max_row = grid_gdf['mat_row'].max()
 
@@ -173,19 +127,22 @@ def apply_zone_detail_smoothing(grid_gdf, value_col, sigma=0.5):
         matrix[r, c] = row[value_col]
 
     mask_valid = ~np.isnan(matrix)
-    if not mask_valid.any():
-        grid_gdf['Smooth_Value'] = grid_gdf[value_col]
-        return grid_gdf
+    # [V38] Edge Boosting Logic
+    eroded_mask = binary_erosion(mask_valid, iterations=1)
+    edge_mask = mask_valid & (~eroded_mask)
 
-    coords = np.argwhere(mask_valid)
-    values = matrix[mask_valid]
+    valid_vals = matrix[mask_valid]
+    robust_vals = valid_vals[valid_vals > 0.1]
+    field_mean = np.mean(robust_vals) if len(robust_vals) > 0 else np.nanmean(matrix)
 
-    interp = NearestNDInterpolator(coords, values)
-    all_coords = np.indices(matrix.shape).transpose(1, 2, 0).reshape(-1, 2)
-    filled_flat = interp(all_coords)
-    filled_matrix = filled_flat.reshape(matrix.shape)
+    boosted_matrix = matrix.copy()
+    # 가장자리를 평균값과 섞어 중화시킴 (Red Edge 방지)
+    boosted_matrix[edge_mask] = (boosted_matrix[edge_mask] * 0.4) + (field_mean * 0.6)
 
-    smoothed_matrix = gaussian_filter(filled_matrix, sigma=sigma, mode='mirror')
+    filled_matrix = boosted_matrix.copy()
+    filled_matrix[np.isnan(filled_matrix)] = field_mean
+
+    smoothed_matrix = gaussian_filter(filled_matrix, sigma=sigma, mode='constant', cval=field_mean)
 
     smoothed_values = []
     for _, row in grid_gdf.iterrows():
@@ -195,16 +152,11 @@ def apply_zone_detail_smoothing(grid_gdf, value_col, sigma=0.5):
             smoothed_values.append(np.nan)
         else:
             smoothed_values.append(val)
-
     grid_gdf['Smooth_Value'] = smoothed_values
     return grid_gdf
 
 
-# ======================================================
-# 5. 후처리 (다수결 필터)
-# ======================================================
 def apply_majority_filter(grid_gdf, zone_col='Zone', size=3):
-    print(f"  [Post-Processing] Majority Filter (Size={size})...")
     max_col = grid_gdf['mat_col'].max()
     max_row = grid_gdf['mat_row'].max()
     matrix = np.zeros((max_row + 1, max_col + 1), dtype=int)
@@ -224,14 +176,47 @@ def apply_majority_filter(grid_gdf, zone_col='Zone', size=3):
     for _, row in grid_gdf.iterrows():
         new_val = cleaned_matrix[int(row['mat_row']), int(row['mat_col'])]
         new_zones.append(row[zone_col] if new_val == 0 else new_val)
-
     grid_gdf[zone_col] = new_zones
     return grid_gdf
 
 
-# ======================================================
-# 6. 시각화 및 통계
-# ======================================================
+def print_stats(grid, zone_col, bins, title):
+    colors = ["Red", "Orange", "Yellow", "Lt.Green", "Green"]
+    valid_zones = grid[grid[zone_col] != 0]
+    total_valid = len(valid_zones)
+
+    print("\n" + "=" * 95)
+    print(f" [{title}]")
+    print(f" {'Zone':<12} | {'Range':<20} | {'Area(m2)':<10} | {'Area(%)':<8} | {'Mean':<8} | {'Min':<8} | {'Max':<8}")
+    print("-" * 95)
+
+    stats_df = valid_zones.groupby(zone_col)
+    value_col = 'Raw_GNDVI' if 'Raw' in zone_col else 'Smooth_Value'
+
+    for z in range(1, N_ZONES + 1):
+        if len(bins) >= N_ZONES + 1:
+            lower = bins[z - 1];
+            upper = bins[z]
+        else:
+            lower = np.nan;
+            upper = np.nan
+
+        if z in stats_df.groups:
+            g = stats_df.get_group(z)
+            count = len(g)
+            area_m2 = g.geometry.area.sum()
+            pct = (count / total_valid) * 100
+            mean_val = g[value_col].mean()
+            min_val = g[value_col].min()
+            max_val = g[value_col].max()
+            print(
+                f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    | {area_m2:>10.1f} | {pct:>6.2f}%  | {mean_val:.3f}    | {min_val:.3f}    | {max_val:.3f}")
+        else:
+            print(
+                f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    |       0.0  |   0.00%  |   -      |   -      |   -   ")
+    print("=" * 95 + "\n")
+
+
 def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None):
     colors = ['#FF0000', '#FFA500', '#FFFF00', '#90EE90', '#008000']
     cmap = ListedColormap(colors)
@@ -252,117 +237,110 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
-def print_stats(grid, zone_col, bins, title):
-    colors = ["Red", "Orange", "Yellow", "Lt.Green", "Green"]
-    valid_zones = grid[grid[zone_col] != 0]
-    total_valid = len(valid_zones)
-
-    print("\n" + "=" * 95)
-    print(f" [{title}]")
-    print(f" {'Zone':<12} | {'Range':<20} | {'Area(m2)':<10} | {'Area(%)':<8} | {'Mean':<8} | {'Min':<8} | {'Max':<8}")
-    print("-" * 95)
-
-    stats_df = valid_zones.groupby(zone_col)
-    value_col = 'Raw_GNDVI' if 'Raw' in zone_col else 'Smooth_Value'
-
-    for z in range(1, N_ZONES + 1):
-        lower = bins[z - 1]
-        upper = bins[z]
-
-        if z in stats_df.groups:
-            g = stats_df.get_group(z)
-            count = len(g)
-            area_m2 = g.geometry.area.sum()  # m2
-            pct = (count / total_valid) * 100
-
-            mean_val = g[value_col].mean()
-            min_val = g[value_col].min()
-            max_val = g[value_col].max()
-
-            print(
-                f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    | {area_m2:>10.1f} | {pct:>6.2f}%  | {mean_val:.3f}    | {min_val:.3f}    | {max_val:.3f}")
-        else:
-            print(
-                f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    |       0.0  |   0.00%  |   -      |   -      |   -   ")
-    print("=" * 95 + "\n")
-
-
+# ======================================================
+# 3. 메인 프로세스
+# ======================================================
 def main():
     if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
 
-    boundary = load_boundary_from_zip(BOUNDARY_ZIP_PATH)
-    if boundary is None: return
-    if boundary.crs.is_geographic: boundary = boundary.to_crs(epsg=5179)
+    # 1. 파일 검색 및 바운더리 감지기 초기화
+    tif_files = glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI.tif"))
+    detector = BoundaryDetector()  # 모듈 클래스 사용
 
-    # 1. 래스터 클리핑 (메모리 로드)
-    mem_raster = clip_raster_to_boundary(GNDVI_PATH, boundary)
+    for tif_path in tif_files:
+        filename = os.path.basename(tif_path)
+        # 파일명 파싱 예시: "GJR1_02_250724_GNDVI.tif" -> "GJR1"
+        try:
+            field_code = filename.split("_")[0]
+        except:
+            field_code = "Unknown"
 
-    print(">>> 1. 그리드 생성")
-    grid = create_rotated_grid_with_indices(boundary, grid_size=GRID_SIZE)
+        print(f"\n>>> Processing: {filename} (Field Code: {field_code})")
 
-    print(">>> 2. 1m 그리드 값 추출 (Using Clipped Raster)")
-    grid = calculate_grid_mean_stats(grid, mem_raster, col_name='Raw_GNDVI')
+        # 2. 바운더리 로드 또는 자동 생성
+        boundary_path = os.path.join(DATA_FOLDER, f"{field_code}_Boundary.zip")
+        boundary = None
 
-    # -----------------------------------------------------------
-    # [Step 2] Raw Data Quantile (20% Equal) & Save
-    # -----------------------------------------------------------
-    raw_valid = grid.dropna(subset=['Raw_GNDVI'])
+        if os.path.exists(boundary_path):
+            print(f"  - Found boundary file: {boundary_path}")
+            boundary = detector.load_boundary_from_zip(boundary_path)
+        else:
+            print(f"  - Boundary file NOT found. Attempting Auto-Detection...")
+            boundary = detector.detect_boundary_otsu(tif_path)
 
-    # Raw는 항상 20% Equal Quantile
-    _, raw_bins = pd.qcut(raw_valid['Raw_GNDVI'], q=N_ZONES, retbins=True, duplicates='drop')
-    if len(raw_bins) < N_ZONES + 1:
-        _, raw_bins = pd.qcut(raw_valid['Raw_GNDVI'].rank(method='first'), q=N_ZONES, retbins=True)
+        if boundary is None:
+            print("  - [FAIL] Boundary could not be established. Skipping file.")
+            continue
 
-    grid['Zone_Raw'] = pd.cut(grid['Raw_GNDVI'], bins=raw_bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
-    grid['Zone_Raw'] = pd.to_numeric(grid['Zone_Raw'], errors='coerce').fillna(0).astype(int)
+        # 좌표계 통일 (권장: EPSG 5179, 필요시 소스 TIF 좌표계로 변환)
+        # 여기서는 TIF가 대부분 5179/32652 등 미터 좌표계라고 가정
+        if boundary.crs and boundary.crs.is_geographic:
+            boundary = boundary.to_crs(epsg=5179)
 
-    print_stats(grid, 'Zone_Raw', raw_bins, "Raw Data Statistics (20% Equal)")
-    save_map_image(grid, os.path.join(OUTPUT_FOLDER, "Result_1_Raw_Quantile.png"),
-                   "(Raw Data - 20% Equal)", zone_col='Zone_Raw', boundary_gdf=boundary)
+        # -----------------------------------------------------------
+        # [Zonation Logic Start] - V38 Edge Boosting
+        # -----------------------------------------------------------
+        try:
+            # 1. 래스터 클리핑
+            mem_raster = clip_raster_to_boundary(tif_path, boundary)
 
-    # -----------------------------------------------------------
-    # [Step 3] Zone Detail 적용 (Smoothing)
-    # -----------------------------------------------------------
-    print(f">>> 3. Zone Detail 적용 (Sigma={ZONE_DETAIL_SIGMA})")
-    grid = apply_zone_detail_smoothing(grid, value_col='Raw_GNDVI', sigma=ZONE_DETAIL_SIGMA)
+            # 2. 그리드 생성
+            grid = create_rotated_grid_with_indices(boundary, grid_size=GRID_SIZE)
 
-    # -----------------------------------------------------------
-    # [Step 4] 최종 등급 부여 (Target Distribution Applied)
-    # -----------------------------------------------------------
-    smooth_valid = grid.dropna(subset=['Smooth_Value'])
-    print(f">>> 4. 최종 등급 부여 (Target: {TARGET_QUANTILES})")
+            # 3. Raw Data 추출
+            grid = calculate_grid_mean_stats(grid, mem_raster, col_name='Raw_GNDVI')
 
-    # [핵심] 스무딩된 데이터에서 목표 비율(8.5, 25, 33...)에 해당하는 Cutoff 찾기
-    final_bins = smooth_valid['Smooth_Value'].quantile(TARGET_QUANTILES).values
+            # 4. 기준점 계산 (Raw 20% Equal)
+            raw_valid = grid.dropna(subset=['Raw_GNDVI'])
+            if len(raw_valid) == 0:
+                print("  - No valid data in grid. Skipping.")
+                continue
 
-    # 중복 값 방지 (Rank 기반)
-    if len(np.unique(final_bins)) < len(final_bins):
-        final_bins = smooth_valid['Smooth_Value'].rank(method='first').quantile(TARGET_QUANTILES).values
+            _, raw_bins = pd.qcut(raw_valid['Raw_GNDVI'], q=N_ZONES, retbins=True, duplicates='drop')
+            if len(raw_bins) < N_ZONES + 1:
+                _, raw_bins = pd.qcut(raw_valid['Raw_GNDVI'].rank(method='first'), q=N_ZONES, retbins=True)
 
-    grid['Zone'] = pd.cut(grid['Smooth_Value'], bins=final_bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
-    grid['Zone'] = pd.to_numeric(grid['Zone'], errors='coerce').fillna(0).astype(int)
+            # Raw 통계 출력 (확인용)
+            # grid['Zone_Raw'] = pd.cut(grid['Raw_GNDVI'], bins=raw_bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
+            # print_stats(grid, 'Zone_Raw', raw_bins, f"Raw Data Stats - {filename}")
 
-    # 범위 보정
-    mask_valid = grid['Smooth_Value'].notna()
-    grid.loc[mask_valid & (grid['Zone'] < 1), 'Zone'] = 1
-    grid.loc[mask_valid & (grid['Zone'] > 5), 'Zone'] = 5
+            # 5. 스무딩 적용 (V38: Edge Boosting)
+            grid = apply_zone_detail_smoothing(grid, value_col='Raw_GNDVI', sigma=ZONE_DETAIL_SIGMA)
 
-    # -----------------------------------------------------------
-    # [Step 5] 다수결 필터 & 최종 통계
-    # -----------------------------------------------------------
-    grid = apply_majority_filter(grid, zone_col='Zone', size=MAJORITY_FILTER_SIZE)
+            # 6. 최종 등급 부여 (Apply Raw Bins to Smooth Data)
+            grid['Zone'] = pd.cut(grid['Smooth_Value'], bins=raw_bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
+            grid['Zone'] = pd.to_numeric(grid['Zone'], errors='coerce').fillna(0).astype(int)
 
-    print_stats(grid, 'Zone', final_bins, "Final Map Statistics (Target Dist)")
+            # 범위 보정
+            mask_valid = grid['Smooth_Value'].notna()
+            grid.loc[mask_valid & (grid['Zone'] < 1), 'Zone'] = 1
+            grid.loc[mask_valid & (grid['Zone'] > 5), 'Zone'] = 5
 
-    save_map_image(grid, os.path.join(OUTPUT_FOLDER, "Result_Pix4D_V30_TargetDist.png"),
-                   f"(Pix4D Final - Custom Target)", zone_col='Zone', boundary_gdf=boundary)
+            # 7. 필터링
+            grid = apply_majority_filter(grid, zone_col='Zone', size=MAJORITY_FILTER_SIZE)
 
-    grid_save = grid.rename(columns={'Smooth_Value': 'GNDVI_Sm', 'Raw_GNDVI': 'GNDVI_Rw'})
-    save_cols = [c for c in grid_save.columns if c not in ['mat_col', 'mat_row', 'Zone_Raw']]
-    grid_save[save_cols].to_file(os.path.join(OUTPUT_FOLDER, "Result_Final.shp"), encoding='euc-kr')
+            # 8. 최종 결과 출력 및 저장
+            print_stats(grid, 'Zone', raw_bins, f"Final Stats - {filename}")
 
-    mem_raster.close()
-    print("완료되었습니다.")
+            # 이미지 저장
+            out_img_name = filename.replace(".tif", "_Result.png")
+            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
+                           f"Result: {filename}", zone_col='Zone', boundary_gdf=boundary)
+
+            # SHP 저장
+            out_shp_name = filename.replace(".tif", "_Result.shp")
+            grid_save = grid.rename(columns={'Smooth_Value': 'GNDVI_Sm', 'Raw_GNDVI': 'GNDVI_Rw'})
+            save_cols = [c for c in grid_save.columns if c not in ['mat_col', 'mat_row', 'Zone_Raw']]
+            grid_save[save_cols].to_file(os.path.join(OUTPUT_FOLDER, out_shp_name), encoding='euc-kr')
+
+            mem_raster.close()
+            print("  - Processing Complete.")
+
+        except Exception as e:
+            print(f"  - Error processing {filename}: {e}")
+            # 디버깅을 위해 상세 에러 출력
+            import traceback
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
