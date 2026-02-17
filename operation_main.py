@@ -28,8 +28,8 @@ pd.set_option('future.no_silent_downcasting', True)
 # 0. 설정
 # ======================================================
 DATA_FOLDER = "test_data"
-OUTPUT_FOLDER = "result_final_vra"
-VRA_CSV_PATH = "test_data/vra.csv"  # VRA 설정 파일 경로
+OUTPUT_FOLDER = "result_final_dji"  # 폴더명 변경
+VRA_CSV_PATH = "vra.csv"
 
 GRID_SIZE = 1.0
 N_ZONES = 5
@@ -39,7 +39,7 @@ MAJORITY_FILTER_SIZE = 3
 
 
 # ======================================================
-# 1. 분석 함수들 (기존 유지)
+# 1. 유틸리티 및 분석 함수 (기존 유지)
 # ======================================================
 def get_main_angle(geometry):
     rect = geometry.minimum_rotated_rectangle
@@ -175,15 +175,132 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
+def print_stats(grid, zone_col, bins, title):
+    colors = ["Red", "Orange", "Yellow", "Lt.Green", "Green"]
+    valid_zones = grid[grid[zone_col] != 0]
+    total_valid = len(valid_zones)
+    print("\n" + "=" * 95)
+    print(f" [{title}]")
+    print(f" {'Zone':<12} | {'Range':<20} | {'Area(m2)':<10} | {'Area(%)':<8} | {'Mean':<8}")
+    print("-" * 95)
+    stats_df = valid_zones.groupby(zone_col)
+    for z in range(1, N_ZONES + 1):
+        if len(bins) >= N_ZONES + 1:
+            lower = bins[z - 1]; upper = bins[z]
+        else:
+            lower = np.nan; upper = np.nan
+        if z in stats_df.groups:
+            g = stats_df.get_group(z)
+            count = len(g)
+            area_m2 = g.geometry.area.sum()
+            pct = (count / total_valid) * 100
+            mean_val = g['Smooth_Value'].mean()
+            print(
+                f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    | {area_m2:>10.1f} | {pct:>6.2f}%  | {mean_val:.3f}")
+        else:
+            print(f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    |       0.0  |   0.00%  |   -")
+    print("=" * 95 + "\n")
+
+
 # ======================================================
-# 2. 메인 프로세스
+# [NEW] DJI 포맷 저장 함수 (Rx TIF/TFW & Boundary SHP)
+# ======================================================
+def save_dji_files(grid_gdf, vra_df, boundary_gdf, field_code, src_meta):
+    """
+    DJI 기체 호환용 파일 생성:
+    1. DJI/Rx/{field_code}.tif (값=Rate)
+    2. DJI/Rx/{field_code}.tfw (좌표 정보)
+    3. DJI/ShapeFile/{field_code}.shp (바운더리)
+    """
+    print(f"  [Output] Generating DJI Compatible Files for {field_code}...")
+
+    # 1. 폴더 생성
+    rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
+    shp_folder = os.path.join(OUTPUT_FOLDER, "DJI", "ShapeFile")
+    os.makedirs(rx_folder, exist_ok=True)
+    os.makedirs(shp_folder, exist_ok=True)
+
+    # 2. 바운더리 SHP 저장
+    boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
+    boundary_gdf.to_file(boundary_out, encoding='euc-kr')
+    print(f"    - Boundary saved: {boundary_out}")
+
+    # 3. Rx TIF 생성 (Rasterize Rates)
+    # Zone별 Rate 매핑 사전 생성
+    rate_map = {}  # {Zone_Index: Rate_Value}
+    for _, row in vra_df.iterrows():
+        # Zone 문자열 "1(빨강)"에서 숫자 "1" 추출
+        try:
+            zone_idx = int(str(row['Zone']).split('(')[0])
+            rate_val = float(row['Rate(kg/ha)'])
+            rate_map[zone_idx] = rate_val
+        except:
+            continue
+
+    # 그리드에 Rate 값 매핑
+    # 매핑되지 않은(0등급 등) 곳은 0으로 처리
+    grid_gdf['Rx_Rate'] = grid_gdf['Zone'].map(rate_map).fillna(0)
+
+    # DataFrame -> Numpy Array 변환 (Rasterize보다 빠름)
+    max_col = grid_gdf['mat_col'].max()
+    max_row = grid_gdf['mat_row'].max()
+
+    # 빈 래스터 생성 (0으로 초기화)
+    rx_raster = np.zeros((max_row + 1, max_col + 1), dtype='float32')
+
+    # 값 채우기
+    # grid_gdf에는 유효한 그리드만 있으므로, 여기 없는 곳은 0(배경)이 됨
+    for _, row in grid_gdf.iterrows():
+        r, c = int(row['mat_row']), int(row['mat_col'])
+        rx_raster[r, c] = row['Rx_Rate']
+
+    # 원본 래스터 정보 복사 및 수정
+    out_meta = src_meta.copy()
+    out_meta.update({
+        "driver": "GTiff",
+        "height": rx_raster.shape[0],
+        "width": rx_raster.shape[1],
+        "count": 1,
+        "dtype": 'float32',
+        "nodata": 0
+    })
+
+    # 4. TIF 저장
+    tif_out = os.path.join(rx_folder, f"{field_code}.tif")
+    tfw_out = os.path.join(rx_folder, f"{field_code}.tfw")
+
+    with rasterio.open(tif_out, "w", **out_meta) as dest:
+        dest.write(rx_raster, 1)
+        # Transform 정보 가져오기
+        transform = dest.transform
+
+    # 5. TFW 파일 생성 (World File)
+    # Line 1: Pixel X size
+    # Line 2: Rotation (0)
+    # Line 3: Rotation (0)
+    # Line 4: Pixel Y size (Negative)
+    # Line 5: Top Left X
+    # Line 6: Top Left Y
+    with open(tfw_out, "w") as f:
+        f.write(f"{transform.a}\n")  # Pixel width
+        f.write(f"{transform.b}\n")  # Rotation
+        f.write(f"{transform.d}\n")  # Rotation
+        f.write(f"{transform.e}\n")  # Pixel height
+        f.write(f"{transform.c}\n")  # X origin
+        f.write(f"{transform.f}\n")  # Y origin
+
+    print(f"    - Rx Map saved: {tif_out}")
+    print(f"    - World File saved: {tfw_out}")
+
+
+# ======================================================
+# 3. 메인 프로세스
 # ======================================================
 def main():
     if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
 
-    # 모듈 초기화
     detector = BoundaryDetector()
-    vra_calc = VRACalculator(VRA_CSV_PATH)  # VRA 모듈 초기화
+    vra_calc = VRACalculator(VRA_CSV_PATH)
 
     tif_files = glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI.tif"))
 
@@ -196,7 +313,7 @@ def main():
 
         print(f"\n>>> Processing: {filename} (Field Code: {field_code})")
 
-        # 1. Boundary
+        # 1. Boundary Load/Detect
         boundary_path = os.path.join(DATA_FOLDER, f"{field_code}_Boundary.zip")
         if os.path.exists(boundary_path):
             boundary = detector.load_boundary_from_zip(boundary_path)
@@ -207,8 +324,17 @@ def main():
         if boundary.crs.is_geographic: boundary = boundary.to_crs(epsg=5179)
 
         try:
+            # 원본 메타데이터 확보 (나중에 Rx 저장 시 사용)
+            # Clip된 메모리 파일 대신 원본 파일에서 transform 정보 등을 참조해야 정확함
+            # 단, Grid 생성 시 boundary 기준으로 잘랐으므로, Grid 생성 시 사용된 transform을 추적해야 함.
+            # 여기서는 clip_raster_to_boundary에서 생성된 mem_raster의 메타데이터를 사용하겠습니다.
+
             # 2. Zonation Process
             mem_raster = clip_raster_to_boundary(tif_path, boundary)
+            # 메타데이터 복사 (나중에 DJI 저장용)
+            with mem_raster.open() as src:
+                src_meta = src.meta.copy()
+
             grid = create_rotated_grid_with_indices(boundary, grid_size=GRID_SIZE)
             grid = calculate_grid_mean_stats(grid, mem_raster, col_name='Raw_GNDVI')
 
@@ -228,7 +354,7 @@ def main():
             grid.loc[mask_valid & (grid['Zone'] > 5), 'Zone'] = 5
             grid = apply_majority_filter(grid, zone_col='Zone', size=MAJORITY_FILTER_SIZE)
 
-            # 3. Zone Stats Extraction for VRA
+            # 3. Zone Stats for VRA
             valid_zones = grid[grid['Zone'] != 0]
             stats_df = valid_zones.groupby('Zone')
 
@@ -247,22 +373,19 @@ def main():
             vra_df = vra_calc.calculate_prescription(field_code, zone_stats)
 
             if vra_df is not None:
-                print(vra_df)
-                # Save VRA Result
+                # 5. [NEW] Save DJI Files (Rx TIF/TFW & Boundary SHP)
+                save_dji_files(grid, vra_df, boundary, field_code, src_meta)
+
+                # 통계 CSV 저장 (참고용)
                 vra_out_name = filename.replace(".tif", "_VRA.csv")
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
             else:
-                print("  - Skipped VRA Calculation (Missing data or config).")
+                print("  - [SKIP] VRA Calculation failed (Missing config or data).")
 
-            # 5. Save Maps
+            # 6. Visualization Maps (Optional)
             out_img_name = filename.replace(".tif", "_Result.png")
             save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
                            f"Result: {filename}", zone_col='Zone', boundary_gdf=boundary)
-
-            out_shp_name = filename.replace(".tif", "_Result.shp")
-            grid_save = grid.rename(columns={'Smooth_Value': 'GNDVI_Sm', 'Raw_GNDVI': 'GNDVI_Rw'})
-            save_cols = [c for c in grid_save.columns if c not in ['mat_col', 'mat_row', 'Zone_Raw']]
-            grid_save[save_cols].to_file(os.path.join(OUTPUT_FOLDER, out_shp_name), encoding='euc-kr')
 
             mem_raster.close()
             print("  - Processing Complete.")
