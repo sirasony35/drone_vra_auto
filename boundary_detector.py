@@ -47,15 +47,12 @@ class BoundaryDetector:
                 )
 
                 # 2. 유효 데이터 및 최소 안전장치 (Safe Floor)
-                # GNDVI -1 ~ 1 범위. 0.05 이하는 확실한 비식생(물, 진흙, 도로)으로 간주
-                # 하지만 생육이 아주 안좋은 필지를 대비해 아주 낮게 설정
                 SAFE_FLOOR = 0.05
 
                 valid_mask = ~np.isnan(data)
                 if src.nodata is not None:
                     valid_mask &= (data != src.nodata)
 
-                # 최소한의 노이즈만 제거한 데이터 준비
                 candidate_mask = valid_mask & (data > SAFE_FLOOR)
 
                 if np.sum(candidate_mask) == 0:
@@ -69,12 +66,9 @@ class BoundaryDetector:
                 except:
                     otsu_thresh = np.mean(valid_pixels)  # 실패시 평균 사용
 
-                # [핵심] 임계값 완화 (Relaxation)
-                # Otsu가 칼같이 자르면 경계면의 약한 작물이 잘릴 수 있음.
-                # 계산된 값의 90% 수준(혹은 -0.05)으로 낮춰서 안전하게 포함시킴
+                # [핵심] 임계값 완화 (Relaxation) - 10% 낮춤
                 final_thresh = otsu_thresh * 0.9
 
-                # 너무 낮아지는 것 방지 (Safe Floor 보다는 커야 함)
                 if final_thresh < SAFE_FLOOR:
                     final_thresh = SAFE_FLOOR
 
@@ -84,16 +78,12 @@ class BoundaryDetector:
                 binary_img = (data > final_thresh)
 
                 # 4. 모폴로지 연산 (다듬기)
-                # Opening: 아주 작은 점(노이즈) 제거
                 open_structure = np.ones((3, 3))
                 binary_img = binary_opening(binary_img, structure=open_structure)
 
-                # Closing: 작물 사이 틈새 메우기 (연결성 확보)
-                # 작물이 듬성듬성 심겨진 경우를 대비해 커널을 적절히 유지
                 close_structure = np.ones((5, 5))
                 binary_img = binary_closing(binary_img, structure=close_structure)
 
-                # Fill Holes: 필지 내부의 구멍 메우기
                 binary_img = binary_fill_holes(binary_img)
                 binary_img = binary_img.astype('uint8')
 
@@ -112,11 +102,9 @@ class BoundaryDetector:
 
                 if len(gdf) > 1:
                     gdf['area'] = gdf.geometry.area
-                    # 가장 큰 덩어리 1개만 선택 (메인 밭)
                     gdf = gdf.sort_values('area', ascending=False).iloc[0:1]
 
                 # 7. 단순화 (Simplify)
-                # 외곽선을 부드럽게 정리
                 gdf['geometry'] = gdf.geometry.simplify(0.3)
 
                 return gdf
