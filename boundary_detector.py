@@ -20,6 +20,7 @@ class BoundaryDetector:
         try:
             gdf = gpd.read_file(safe_path)
             if gdf.crs is None: gdf.crs = "EPSG:4326"
+            print('loading boundary from zip')
             return gdf
         except Exception as e:
             print(f"    [Error] 바운더리 로드 실패: {e}")

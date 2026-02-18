@@ -6,6 +6,8 @@ import pandas as pd
 import rasterio
 from rasterio.mask import mask
 from rasterio.io import MemoryFile
+from rasterio.features import rasterize
+from rasterio.transform import from_origin
 from shapely.geometry import Polygon
 from shapely import affinity
 import math
@@ -28,18 +30,18 @@ pd.set_option('future.no_silent_downcasting', True)
 # 0. 설정
 # ======================================================
 DATA_FOLDER = "test_data"
-OUTPUT_FOLDER = "result_final_dji"  # 폴더명 변경
+OUTPUT_FOLDER = "result_final_dji_wgs84"  # 결과 폴더
 VRA_CSV_PATH = "vra.csv"
 
 GRID_SIZE = 1.0
 N_ZONES = 5
 VALID_THRESHOLD = -999.0
-ZONE_DETAIL_SIGMA = 0.8
+ZONE_DETAIL_SIGMA = 1.4
 MAJORITY_FILTER_SIZE = 3
 
 
 # ======================================================
-# 1. 유틸리티 및 분석 함수 (기존 유지)
+# 1. 유틸리티 및 분석 함수 (V38 로직 유지)
 # ======================================================
 def get_main_angle(geometry):
     rect = geometry.minimum_rotated_rectangle
@@ -203,33 +205,30 @@ def print_stats(grid, zone_col, bins, title):
 
 
 # ======================================================
-# [NEW] DJI 포맷 저장 함수 (Rx TIF/TFW & Boundary SHP)
+# [최종 수정] DJI WGS84 저장 함수 (핵심)
 # ======================================================
-def save_dji_files(grid_gdf, vra_df, boundary_gdf, field_code, src_meta):
-    """
-    DJI 기체 호환용 파일 생성:
-    1. DJI/Rx/{field_code}.tif (값=Rate)
-    2. DJI/Rx/{field_code}.tfw (좌표 정보)
-    3. DJI/ShapeFile/{field_code}.shp (바운더리)
-    """
-    print(f"  [Output] Generating DJI Compatible Files for {field_code}...")
+def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code):
+    print(f"  [Output] Generating DJI Compatible Files (WGS84)...")
 
-    # 1. 폴더 생성
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
     shp_folder = os.path.join(OUTPUT_FOLDER, "DJI", "ShapeFile")
     os.makedirs(rx_folder, exist_ok=True)
     os.makedirs(shp_folder, exist_ok=True)
 
-    # 2. 바운더리 SHP 저장
+    # ------------------------------------------------
+    # 1. Boundary SHP 저장 (EPSG:4326 변환)
+    # ------------------------------------------------
+    boundary_4326 = boundary_gdf.to_crs(epsg=4326)
     boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
-    boundary_gdf.to_file(boundary_out, encoding='euc-kr')
-    print(f"    - Boundary saved: {boundary_out}")
+    boundary_4326.to_file(boundary_out, encoding='euc-kr')
+    print(f"    - Boundary (SHP/WGS84) saved: {boundary_out}")
 
-    # 3. Rx TIF 생성 (Rasterize Rates)
-    # Zone별 Rate 매핑 사전 생성
-    rate_map = {}  # {Zone_Index: Rate_Value}
+    # ------------------------------------------------
+    # 2. Rx TIF 생성 (EPSG:4326 변환 및 Rasterize)
+    # ------------------------------------------------
+    # (1) VRA Rate 매핑
+    rate_map = {}
     for _, row in vra_df.iterrows():
-        # Zone 문자열 "1(빨강)"에서 숫자 "1" 추출
         try:
             zone_idx = int(str(row['Zone']).split('(')[0])
             rate_val = float(row['Rate(kg/ha)'])
@@ -237,64 +236,73 @@ def save_dji_files(grid_gdf, vra_df, boundary_gdf, field_code, src_meta):
         except:
             continue
 
-    # 그리드에 Rate 값 매핑
-    # 매핑되지 않은(0등급 등) 곳은 0으로 처리
     grid_gdf['Rx_Rate'] = grid_gdf['Zone'].map(rate_map).fillna(0)
 
-    # DataFrame -> Numpy Array 변환 (Rasterize보다 빠름)
-    max_col = grid_gdf['mat_col'].max()
-    max_row = grid_gdf['mat_row'].max()
+    # (2) Grid를 WGS84로 변환
+    # 분석은 5179에서 했지만, 저장은 4326에서 해야 함
+    grid_4326 = grid_gdf.to_crs(epsg=4326)
 
-    # 빈 래스터 생성 (0으로 초기화)
-    rx_raster = np.zeros((max_row + 1, max_col + 1), dtype='float32')
+    # (3) 래스터화 (Rasterize) 설정
+    # WGS84 기준의 Bounds와 해상도 설정
+    minx, miny, maxx, maxy = grid_4326.total_bounds
 
-    # 값 채우기
-    # grid_gdf에는 유효한 그리드만 있으므로, 여기 없는 곳은 0(배경)이 됨
-    for _, row in grid_gdf.iterrows():
-        r, c = int(row['mat_row']), int(row['mat_col'])
-        rx_raster[r, c] = row['Rx_Rate']
+    # 픽셀 크기 설정 (약 0.00001도 ≈ 1m, 정밀도를 위해 촘촘하게 설정)
+    # 원본 해상도를 최대한 유지하기 위해 가로/세로 비율 고려
+    # 대략 0.5미터 급 해상도 목표 (5e-6)
+    pixel_size = 0.000005
 
-    # 원본 래스터 정보 복사 및 수정
-    out_meta = src_meta.copy()
-    out_meta.update({
+    width = int((maxx - minx) / pixel_size)
+    height = int((maxy - miny) / pixel_size)
+
+    # [중요] Transform 생성 (Top-Left 기준)
+    # North(maxy)에서 시작하여 pixel_size만큼 뺌(음수) -> 그래야 이미지가 뒤집히지 않음
+    transform = from_origin(minx, maxy, pixel_size, pixel_size)
+
+    # (4) Rasterize 실행
+    # geometry와 value 쌍 준비
+    shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['Rx_Rate']))
+
+    out_image = rasterize(
+        shapes=shapes,
+        out_shape=(height, width),
+        transform=transform,
+        fill=0,
+        dtype='float32'
+    )
+
+    # (5) TIF 저장
+    tif_out = os.path.join(rx_folder, f"{field_code}.tif")
+
+    out_meta = {
         "driver": "GTiff",
-        "height": rx_raster.shape[0],
-        "width": rx_raster.shape[1],
+        "height": height,
+        "width": width,
         "count": 1,
         "dtype": 'float32',
+        "crs": "EPSG:4326",  # WGS84 명시
+        "transform": transform,
         "nodata": 0
-    })
-
-    # 4. TIF 저장
-    tif_out = os.path.join(rx_folder, f"{field_code}.tif")
-    tfw_out = os.path.join(rx_folder, f"{field_code}.tfw")
+    }
 
     with rasterio.open(tif_out, "w", **out_meta) as dest:
-        dest.write(rx_raster, 1)
-        # Transform 정보 가져오기
-        transform = dest.transform
+        dest.write(out_image, 1)
 
-    # 5. TFW 파일 생성 (World File)
-    # Line 1: Pixel X size
-    # Line 2: Rotation (0)
-    # Line 3: Rotation (0)
-    # Line 4: Pixel Y size (Negative)
-    # Line 5: Top Left X
-    # Line 6: Top Left Y
+    # (6) TFW 파일 생성 (DJI 호환성 필수)
+    tfw_out = os.path.join(rx_folder, f"{field_code}.tfw")
     with open(tfw_out, "w") as f:
-        f.write(f"{transform.a}\n")  # Pixel width
+        f.write(f"{transform.a}\n")  # Pixel width (X scale)
         f.write(f"{transform.b}\n")  # Rotation
         f.write(f"{transform.d}\n")  # Rotation
-        f.write(f"{transform.e}\n")  # Pixel height
+        f.write(f"{transform.e}\n")  # Pixel height (Y scale, Negative)
         f.write(f"{transform.c}\n")  # X origin
         f.write(f"{transform.f}\n")  # Y origin
 
-    print(f"    - Rx Map saved: {tif_out}")
-    print(f"    - World File saved: {tfw_out}")
+    print(f"    - Rx Map (TIF/WGS84) saved: {tif_out}")
+    print(f"    - World File (TFW) saved: {tfw_out}")
 
 
 # ======================================================
-# 3. 메인 프로세스
+# 2. 메인 프로세스
 # ======================================================
 def main():
     if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
@@ -321,19 +329,14 @@ def main():
             boundary = detector.detect_boundary_otsu(tif_path)
 
         if boundary is None: continue
-        if boundary.crs.is_geographic: boundary = boundary.to_crs(epsg=5179)
+
+        # 작업은 EPSG:5179에서 수행 (미터 단위 계산을 위해)
+        if boundary.crs.is_geographic:
+            boundary = boundary.to_crs(epsg=5179)
 
         try:
-            # 원본 메타데이터 확보 (나중에 Rx 저장 시 사용)
-            # Clip된 메모리 파일 대신 원본 파일에서 transform 정보 등을 참조해야 정확함
-            # 단, Grid 생성 시 boundary 기준으로 잘랐으므로, Grid 생성 시 사용된 transform을 추적해야 함.
-            # 여기서는 clip_raster_to_boundary에서 생성된 mem_raster의 메타데이터를 사용하겠습니다.
-
             # 2. Zonation Process
             mem_raster = clip_raster_to_boundary(tif_path, boundary)
-            # 메타데이터 복사 (나중에 DJI 저장용)
-            with mem_raster.open() as src:
-                src_meta = src.meta.copy()
 
             grid = create_rotated_grid_with_indices(boundary, grid_size=GRID_SIZE)
             grid = calculate_grid_mean_stats(grid, mem_raster, col_name='Raw_GNDVI')
@@ -354,7 +357,7 @@ def main():
             grid.loc[mask_valid & (grid['Zone'] > 5), 'Zone'] = 5
             grid = apply_majority_filter(grid, zone_col='Zone', size=MAJORITY_FILTER_SIZE)
 
-            # 3. Zone Stats for VRA
+            # 3. Zone Stats
             valid_zones = grid[grid['Zone'] != 0]
             stats_df = valid_zones.groupby('Zone')
 
@@ -368,21 +371,20 @@ def main():
                 else:
                     zone_stats.append({'Zone': z, 'Area_m2': 0, 'Mean_GNDVI': 0})
 
-            # 4. VRA Calculation
+            # 4. VRA Calc
             print("  - Calculating VRA Prescription...")
             vra_df = vra_calc.calculate_prescription(field_code, zone_stats)
 
             if vra_df is not None:
-                # 5. [NEW] Save DJI Files (Rx TIF/TFW & Boundary SHP)
-                save_dji_files(grid, vra_df, boundary, field_code, src_meta)
+                # 5. [수정] DJI 파일 저장 (WGS84 변환 적용)
+                save_dji_files_wgs84(grid, vra_df, boundary, field_code)
 
-                # 통계 CSV 저장 (참고용)
                 vra_out_name = filename.replace(".tif", "_VRA.csv")
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
             else:
-                print("  - [SKIP] VRA Calculation failed (Missing config or data).")
+                print("  - [SKIP] VRA Calculation failed.")
 
-            # 6. Visualization Maps (Optional)
+            # Map Save (이미지 확인용은 5179 그대로 저장해도 무방)
             out_img_name = filename.replace(".tif", "_Result.png")
             save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
                            f"Result: {filename}", zone_col='Zone', boundary_gdf=boundary)
