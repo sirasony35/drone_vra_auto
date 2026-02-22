@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
 from scipy.ndimage import gaussian_filter, generic_filter, binary_erosion
-from scipy.interpolate import NearestNDInterpolator
+from skimage.filters import threshold_otsu  # [중요] Otsu 알고리즘 사용
 import warnings
 
 # [모듈 Import]
@@ -30,7 +30,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # 0. 설정
 # ======================================================
 DATA_FOLDER = "test_data"
-OUTPUT_FOLDER = "result_final_dji_wgs84"  # 결과 폴더
+OUTPUT_FOLDER = "result_final_dji_wgs84"
 VRA_CSV_PATH = "vra.csv"
 
 GRID_SIZE = 1.0
@@ -39,9 +39,20 @@ VALID_THRESHOLD = -999.0
 ZONE_DETAIL_SIGMA = 1.35
 MAJORITY_FILTER_SIZE = 3
 
+# [NEW] 마스킹 최적화 파라미터
+# 1. 완화 계수 (0.85 의미: Otsu가 찾은 값의 85%만 적용)
+#    - 값을 낮출수록(0.7 ~ 0.8) 마스킹이 줄어들고 비료를 더 뿌립니다.
+#    - 값을 높일수록(0.9 ~ 1.0) 마스킹이 엄격해집니다.
+OTSU_RELAX_FACTOR = 0.3
+
+# 2. 마스킹 절대 상한선 (Hard Limit)
+#    - Otsu 결과가 아무리 높아도 이 값(GNDVI) 이상은 절대 마스킹하지 않음
+#    - 작물이 심겨진 논이라면 0.40 이상은 무조건 작물로 보는 안전장치
+MAX_MASK_THRESHOLD = 0.40
+
 
 # ======================================================
-# 1. 유틸리티 및 분석 함수 (V38 로직 유지)
+# 1. 유틸리티 및 분석 함수
 # ======================================================
 def get_main_angle(geometry):
     rect = geometry.minimum_rotated_rectangle
@@ -111,7 +122,7 @@ def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
 
 
 def apply_zone_detail_smoothing(grid_gdf, value_col, sigma=0.5):
-    max_col = grid_gdf['mat_col'].max()
+    max_col = grid_gdf['mat_col'].max();
     max_row = grid_gdf['mat_row'].max()
     matrix = np.full((max_row + 1, max_col + 1), np.nan)
     for _, row in grid_gdf.iterrows():
@@ -141,7 +152,7 @@ def apply_zone_detail_smoothing(grid_gdf, value_col, sigma=0.5):
 
 
 def apply_majority_filter(grid_gdf, zone_col='Zone', size=3):
-    max_col = grid_gdf['mat_col'].max()
+    max_col = grid_gdf['mat_col'].max();
     max_row = grid_gdf['mat_row'].max()
     matrix = np.zeros((max_row + 1, max_col + 1), dtype=int)
     for _, row in grid_gdf.iterrows(): matrix[int(row['mat_row']), int(row['mat_col'])] = row[zone_col]
@@ -162,14 +173,21 @@ def apply_majority_filter(grid_gdf, zone_col='Zone', size=3):
 
 
 def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None):
-    colors = ['#FF0000', '#FFA500', '#FFFF00', '#90EE90', '#008000']
+    # [수정] Zone 6 (회색) 추가
+    colors = ['#FF0000', '#FFA500', '#FFFF00', '#90EE90', '#008000', '#808080']
     cmap = ListedColormap(colors)
+
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     plot_data = gdf.copy()
     plot_data[zone_col] = pd.to_numeric(plot_data[zone_col], errors='coerce').fillna(0).astype(int)
-    plot_data.plot(column=zone_col, cmap=cmap, linewidth=0, edgecolor='none', ax=ax, vmin=1, vmax=5)
+
+    # vmin=1, vmax=6
+    plot_data.plot(column=zone_col, cmap=cmap, linewidth=0, edgecolor='none', ax=ax, vmin=1, vmax=6)
+
     if boundary_gdf is not None: boundary_gdf.boundary.plot(ax=ax, color='cyan', linewidth=1, alpha=0.7)
-    legend_patches = [mpatches.Patch(color=c, label=l) for c, l in zip(colors, ["1(Low)", "2", "3", "4", "5(High)"])]
+
+    legend_patches = [mpatches.Patch(color=c, label=l) for c, l in
+                      zip(colors, ["1(High)", "2", "3", "4", "5(Low)", "6(Skip)"])]
     ax.legend(handles=legend_patches, loc='lower right', title="Levels")
     ax.set_title(f"Zonation Map {title_suffix}", fontsize=15)
     ax.set_axis_off()
@@ -177,56 +195,19 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
-def print_stats(grid, zone_col, bins, title):
-    colors = ["Red", "Orange", "Yellow", "Lt.Green", "Green"]
-    valid_zones = grid[grid[zone_col] != 0]
-    total_valid = len(valid_zones)
-    print("\n" + "=" * 95)
-    print(f" [{title}]")
-    print(f" {'Zone':<12} | {'Range':<20} | {'Area(m2)':<10} | {'Area(%)':<8} | {'Mean':<8}")
-    print("-" * 95)
-    stats_df = valid_zones.groupby(zone_col)
-    for z in range(1, N_ZONES + 1):
-        if len(bins) >= N_ZONES + 1:
-            lower = bins[z - 1]; upper = bins[z]
-        else:
-            lower = np.nan; upper = np.nan
-        if z in stats_df.groups:
-            g = stats_df.get_group(z)
-            count = len(g)
-            area_m2 = g.geometry.area.sum()
-            pct = (count / total_valid) * 100
-            mean_val = g['Smooth_Value'].mean()
-            print(
-                f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    | {area_m2:>10.1f} | {pct:>6.2f}%  | {mean_val:.3f}")
-        else:
-            print(f" {z} ({colors[z - 1]}) | {lower:.3f} ~ {upper:.3f}    |       0.0  |   0.00%  |   -")
-    print("=" * 95 + "\n")
-
-
-# ======================================================
-# [최종 수정] DJI WGS84 저장 함수 (핵심)
-# ======================================================
 def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code):
     print(f"  [Output] Generating DJI Compatible Files (WGS84)...")
-
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
     shp_folder = os.path.join(OUTPUT_FOLDER, "DJI", "ShapeFile")
     os.makedirs(rx_folder, exist_ok=True)
     os.makedirs(shp_folder, exist_ok=True)
 
-    # ------------------------------------------------
-    # 1. Boundary SHP 저장 (EPSG:4326 변환)
-    # ------------------------------------------------
+    # 1. Boundary SHP
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
     boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
     boundary_4326.to_file(boundary_out, encoding='euc-kr')
-    print(f"    - Boundary (SHP/WGS84) saved: {boundary_out}")
 
-    # ------------------------------------------------
-    # 2. Rx TIF 생성 (EPSG:4326 변환 및 Rasterize)
-    # ------------------------------------------------
-    # (1) VRA Rate 매핑
+    # 2. Rx TIF
     rate_map = {}
     for _, row in vra_df.iterrows():
         try:
@@ -237,68 +218,74 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code):
             continue
 
     grid_gdf['Rx_Rate'] = grid_gdf['Zone'].map(rate_map).fillna(0)
-
-    # (2) Grid를 WGS84로 변환
-    # 분석은 5179에서 했지만, 저장은 4326에서 해야 함
     grid_4326 = grid_gdf.to_crs(epsg=4326)
 
-    # (3) 래스터화 (Rasterize) 설정
-    # WGS84 기준의 Bounds와 해상도 설정
     minx, miny, maxx, maxy = grid_4326.total_bounds
-
-    # 픽셀 크기 설정 (약 0.00001도 ≈ 1m, 정밀도를 위해 촘촘하게 설정)
-    # 원본 해상도를 최대한 유지하기 위해 가로/세로 비율 고려
-    # 대략 0.5미터 급 해상도 목표 (5e-6)
-    pixel_size = 0.000005
-
+    pixel_size = 0.000005  # Approx 0.5m
     width = int((maxx - minx) / pixel_size)
     height = int((maxy - miny) / pixel_size)
-
-    # [중요] Transform 생성 (Top-Left 기준)
-    # North(maxy)에서 시작하여 pixel_size만큼 뺌(음수) -> 그래야 이미지가 뒤집히지 않음
     transform = from_origin(minx, maxy, pixel_size, pixel_size)
 
-    # (4) Rasterize 실행
-    # geometry와 value 쌍 준비
     shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['Rx_Rate']))
+    out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='float32')
 
-    out_image = rasterize(
-        shapes=shapes,
-        out_shape=(height, width),
-        transform=transform,
-        fill=0,
-        dtype='float32'
-    )
-
-    # (5) TIF 저장
     tif_out = os.path.join(rx_folder, f"{field_code}.tif")
-
-    out_meta = {
-        "driver": "GTiff",
-        "height": height,
-        "width": width,
-        "count": 1,
-        "dtype": 'float32',
-        "crs": "EPSG:4326",  # WGS84 명시
-        "transform": transform,
-        "nodata": 0
-    }
-
+    out_meta = {"driver": "GTiff", "height": height, "width": width, "count": 1, "dtype": 'float32', "crs": "EPSG:4326",
+                "transform": transform, "nodata": 0}
     with rasterio.open(tif_out, "w", **out_meta) as dest:
         dest.write(out_image, 1)
 
-    # (6) TFW 파일 생성 (DJI 호환성 필수)
     tfw_out = os.path.join(rx_folder, f"{field_code}.tfw")
     with open(tfw_out, "w") as f:
-        f.write(f"{transform.a}\n")  # Pixel width (X scale)
-        f.write(f"{transform.b}\n")  # Rotation
-        f.write(f"{transform.d}\n")  # Rotation
-        f.write(f"{transform.e}\n")  # Pixel height (Y scale, Negative)
-        f.write(f"{transform.c}\n")  # X origin
-        f.write(f"{transform.f}\n")  # Y origin
+        f.write(f"{transform.a}\n");
+        f.write(f"{transform.b}\n");
+        f.write(f"{transform.d}\n");
+        f.write(f"{transform.e}\n");
+        f.write(f"{transform.c}\n");
+        f.write(f"{transform.f}\n")
+    print(f"    - Rx Map saved: {tif_out}")
 
-    print(f"    - Rx Map (TIF/WGS84) saved: {tif_out}")
-    print(f"    - World File (TFW) saved: {tfw_out}")
+
+# ======================================================
+# 함수 수정: calculate_dynamic_threshold
+# ======================================================
+def calculate_dynamic_threshold(grid_gdf):
+    """
+    Otsu 알고리즘 값에 완화 계수(Relaxation)를 적용하여
+    '약한 작물'은 살리고 '진짜 맨땅'만 타겟팅합니다.
+    """
+    valid_values = grid_gdf['Smooth_Value'].dropna()
+    valid_values = valid_values[valid_values > 0]  # 0은 제외
+
+    if len(valid_values) < 10:
+        return -999
+
+    try:
+        # 1. Otsu로 수학적 경계값 찾기 (예: 0.45가 나왔다고 가정)
+        raw_otsu = threshold_otsu(valid_values.values)
+
+        # 2. 완화 계수 적용 (0.45 * 0.85 = 0.382) -> 기준을 낮춤
+        relaxed_thresh = raw_otsu * OTSU_RELAX_FACTOR
+
+        print(f"    [Threshold Info] Raw Otsu: {raw_otsu:.4f} -> Relaxed(x{OTSU_RELAX_FACTOR}): {relaxed_thresh:.4f}")
+
+        # 3. 절대 상한선(Safety Clamp) 적용
+        # 계산된 값이 0.40을 넘어가면 강제로 0.40으로 낮춤 (과도한 마스킹 방지)
+        if relaxed_thresh > MAX_MASK_THRESHOLD:
+            print(f"    [Adjustment] Threshold {relaxed_thresh:.4f} exceeds limit. Clamping to {MAX_MASK_THRESHOLD}.")
+            final_thresh = MAX_MASK_THRESHOLD
+        else:
+            final_thresh = relaxed_thresh
+
+        # 4. 너무 낮은 값(0.1 미만)은 사실상 마스킹 의미가 없으므로 무시할 수도 있음 (선택사항)
+        if final_thresh < 0.1:
+            return -999
+
+        return final_thresh
+
+    except Exception as e:
+        print(f"    [Warning] Otsu calculation failed: {e}")
+        return -999
 
 
 # ======================================================
@@ -306,38 +293,25 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code):
 # ======================================================
 def main():
     if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
-
     detector = BoundaryDetector()
     vra_calc = VRACalculator(VRA_CSV_PATH)
-
     tif_files = glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI.tif"))
 
     for tif_path in tif_files:
         filename = os.path.basename(tif_path)
-        try:
-            field_code = filename.split("_")[0]
-        except:
-            field_code = "Unknown"
-
+        field_code = filename.split("_")[0] if "_" in filename else "Unknown"
         print(f"\n>>> Processing: {filename} (Field Code: {field_code})")
 
-        # 1. Boundary Load/Detect
         boundary_path = os.path.join(DATA_FOLDER, f"{field_code}_Boundary.zip")
         if os.path.exists(boundary_path):
             boundary = detector.load_boundary_from_zip(boundary_path)
         else:
             boundary = detector.detect_boundary_otsu(tif_path)
-
         if boundary is None: continue
-
-        # 작업은 EPSG:5179에서 수행 (미터 단위 계산을 위해)
-        if boundary.crs.is_geographic:
-            boundary = boundary.to_crs(epsg=5179)
+        if boundary.crs.is_geographic: boundary = boundary.to_crs(epsg=5179)
 
         try:
-            # 2. Zonation Process
             mem_raster = clip_raster_to_boundary(tif_path, boundary)
-
             grid = create_rotated_grid_with_indices(boundary, grid_size=GRID_SIZE)
             grid = calculate_grid_mean_stats(grid, mem_raster, col_name='Raw_GNDVI')
 
@@ -349,52 +323,66 @@ def main():
                 _, raw_bins = pd.qcut(raw_valid['Raw_GNDVI'].rank(method='first'), q=N_ZONES, retbins=True)
 
             grid = apply_zone_detail_smoothing(grid, value_col='Raw_GNDVI', sigma=ZONE_DETAIL_SIGMA)
+
+            # 1. 기본 Zoning (1~5)
             grid['Zone'] = pd.cut(grid['Smooth_Value'], bins=raw_bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
             grid['Zone'] = pd.to_numeric(grid['Zone'], errors='coerce').fillna(0).astype(int)
 
+            # -----------------------------------------------------------
+            # [NEW] 동적 마스킹 (Dynamic Masking)
+            # -----------------------------------------------------------
+            print("  - Calculating dynamic soil threshold...")
+            soil_threshold = calculate_dynamic_threshold(grid)
+
+            if soil_threshold > -900:
+                print(f"    -> Detected Soil Threshold: {soil_threshold:.4f}")
+                mask_bare = grid['Smooth_Value'] < soil_threshold
+                count_bare = mask_bare.sum()
+                if count_bare > 0:
+                    print(f"    -> Masking {count_bare} grids as Zone 6 (Skip).")
+                    grid.loc[mask_bare, 'Zone'] = 6
+            else:
+                print("    -> No masking applied (Threshold too high or invalid).")
+            # -----------------------------------------------------------
+
             mask_valid = grid['Smooth_Value'].notna()
+            # Zone 6가 아닌 것들만 범위 보정
             grid.loc[mask_valid & (grid['Zone'] < 1), 'Zone'] = 1
-            grid.loc[mask_valid & (grid['Zone'] > 5), 'Zone'] = 5
+            grid.loc[mask_valid & (grid['Zone'] > 5) & (grid['Zone'] != 6), 'Zone'] = 5
+
             grid = apply_majority_filter(grid, zone_col='Zone', size=MAJORITY_FILTER_SIZE)
 
-            # 3. Zone Stats
+            # Zone Stats
             valid_zones = grid[grid['Zone'] != 0]
             stats_df = valid_zones.groupby('Zone')
-
             zone_stats = []
-            for z in range(1, 6):
+
+            # 1~6까지 루프
+            for z in range(1, 7):
                 if z in stats_df.groups:
                     g = stats_df.get_group(z)
-                    area_m2 = g.geometry.area.sum()
-                    mean_gndvi = g['Smooth_Value'].mean()
-                    zone_stats.append({'Zone': z, 'Area_m2': area_m2, 'Mean_GNDVI': mean_gndvi})
+                    zone_stats.append(
+                        {'Zone': z, 'Area_m2': g.geometry.area.sum(), 'Mean_GNDVI': g['Smooth_Value'].mean()})
                 else:
-                    zone_stats.append({'Zone': z, 'Area_m2': 0, 'Mean_GNDVI': 0})
+                    pass  # Empty zone
 
-            # 4. VRA Calc
             print("  - Calculating VRA Prescription...")
             vra_df = vra_calc.calculate_prescription(field_code, zone_stats)
 
             if vra_df is not None:
-                # 5. [수정] DJI 파일 저장 (WGS84 변환 적용)
                 save_dji_files_wgs84(grid, vra_df, boundary, field_code)
-
                 vra_out_name = filename.replace(".tif", "_VRA.csv")
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
-            else:
-                print("  - [SKIP] VRA Calculation failed.")
 
-            # Map Save (이미지 확인용은 5179 그대로 저장해도 무방)
             out_img_name = filename.replace(".tif", "_Result.png")
-            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
-                           f"Result: {filename}", zone_col='Zone', boundary_gdf=boundary)
-
+            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name), f"Result: {filename}", zone_col='Zone',
+                           boundary_gdf=boundary)
             mem_raster.close()
             print("  - Processing Complete.")
 
         except Exception as e:
             print(f"  - Error processing {filename}: {e}")
-            import traceback
+            import traceback;
             traceback.print_exc()
 
 
