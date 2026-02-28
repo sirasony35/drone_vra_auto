@@ -8,12 +8,23 @@ class VRACalculator:
 
     def _load_vra_data(self, path):
         try:
+            # CSV 읽기 (공백 제거 및 소문자 처리 등 전처리)
             df = pd.read_csv(path)
             df['field'] = df['field'].astype(str)
+
+            # 컬럼명 공백 제거
+            df.columns = df.columns.str.strip()
+
             return df.set_index('field')
         except Exception as e:
             print(f"    [Error] VRA 데이터 로드 실패: {e}")
             return None
+
+    def get_field_info(self, field_code):
+        """필지의 모든 설정 정보(행)를 반환"""
+        if self.vra_data is None or field_code not in self.vra_data.index:
+            return None
+        return self.vra_data.loc[field_code]
 
     def calculate_prescription(self, field_code, zone_stats):
         """
