@@ -29,22 +29,21 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "test_data"
-OUTPUT_FOLDER = "result_final_dji_wgs84"
-VRA_CSV_PATH = "vra.csv"
+DATA_FOLDER = "sm_data"
+OUTPUT_FOLDER = "result/result_final_dji_sm"
+VRA_CSV_PATH = "sm_vra.csv"
 
 # 기본값 (CSV에 없을 경우 사용)
-# DEFAULT_GRID_SIZE = 1.0
-# DEFAULT_CROP = 'rice'
-# DEFAULT_SIGMA = 1.35  # 기본 스무딩 강도
+DEFAULT_GRID_SIZE = 1.0
+DEFAULT_CROP = 'rice'
+DEFAULT_SIGMA = 1.35
 
 N_ZONES = 5
 VALID_THRESHOLD = -999.0
 MAJORITY_FILTER_SIZE = 3
 
 # [마스킹 파라미터]
-OTSU_RELAX_FACTOR = 0.3
-MAX_MASK_THRESHOLD = 0.40
+MAX_MASK_THRESHOLD = 0.40  # 안전장치 (이 값 이상은 절대 마스킹 안 함)
 
 
 # ======================================================
@@ -257,14 +256,20 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     print(f"    - Rx Map saved: {tif_out}")
 
 
-def calculate_dynamic_threshold(grid_gdf):
+def calculate_dynamic_threshold(grid_gdf, relax_factor=0.3):
+    """
+    [수정] relax_factor를 외부에서 주입받도록 변경
+    """
     valid_values = grid_gdf['Smooth_Value'].dropna()
     valid_values = valid_values[valid_values > 0]
     if len(valid_values) < 10: return -999
     try:
         raw_otsu = threshold_otsu(valid_values.values)
-        relaxed_thresh = raw_otsu * OTSU_RELAX_FACTOR
-        print(f"    [Threshold Info] Raw Otsu: {raw_otsu:.4f} -> Relaxed(x{OTSU_RELAX_FACTOR}): {relaxed_thresh:.4f}")
+
+        # 주입받은 relax_factor 적용
+        relaxed_thresh = raw_otsu * relax_factor
+        print(f"    [Threshold Info] Raw Otsu: {raw_otsu:.4f} * Factor {relax_factor} = {relaxed_thresh:.4f}")
+
         if relaxed_thresh > MAX_MASK_THRESHOLD:
             final_thresh = MAX_MASK_THRESHOLD
         else:
@@ -292,13 +297,13 @@ def main():
 
         field_info = vra_calc.get_field_info(field_code)
 
-        # 1. 작물 타입 확인 (기본값: rice)
+        # 1. 작물 타입 확인
         if field_info is not None and 'crop' in field_info:
             current_crop = field_info['crop']
         else:
             current_crop = DEFAULT_CROP
 
-        # 2. 그리드 사이즈 확인 (기본값: 1.0)
+        # 2. 그리드 사이즈 확인
         if field_info is not None and 'grid_size' in field_info:
             try:
                 current_grid_size = float(field_info['grid_size'])
@@ -307,8 +312,7 @@ def main():
         else:
             current_grid_size = DEFAULT_GRID_SIZE
 
-        # 3. 스무딩 강도(Sigma) 확인 [NEW]
-        # CSV에 값이 있으면 우선 사용, 없으면 자동 로직(Auto Fallback)
+        # 3. 스무딩 강도 확인
         if field_info is not None and 'sigma' in field_info and not pd.isna(field_info['sigma']):
             try:
                 current_sigma = float(field_info['sigma'])
@@ -316,16 +320,33 @@ def main():
             except:
                 current_sigma = DEFAULT_SIGMA
         else:
-            # Auto Fallback Logic
             if current_grid_size >= 3.0:
                 current_sigma = 0.1
-                print(
-                    f"    [Settings] Large Grid -> Auto-Smoothing OFF (Sigma=0.1). (Tip: Set 'sigma' in CSV to override)")
+                print(f"    [Settings] Large Grid -> Auto-Smoothing OFF (Sigma=0.1)")
             else:
                 current_sigma = DEFAULT_SIGMA
                 print(f"    [Settings] Default Smoothing (Sigma={current_sigma})")
 
-        print(f"    [Summary] Crop: {current_crop} | Grid: {current_grid_size}m | Sigma: {current_sigma}")
+        # [NEW] 4. 마스킹 강도 설정 (CSV 우선 -> 자동 로직 fallback)
+        if field_info is not None and 'masking' in field_info and not pd.isna(field_info['masking']):
+            try:
+                current_relax_factor = float(field_info['masking'])
+                print(f"    [Settings] Masking Factor loaded from CSV: {current_relax_factor}")
+            except:
+                # CSV 값이 잘못되었을 경우 자동 로직으로 fallback
+                if current_crop in ['soybean', 'wheat']:
+                    current_relax_factor = 0.7
+                else:
+                    current_relax_factor = 0.3
+        else:
+            # CSV에 값이 없으면 기존 자동 로직 사용
+            if current_crop in ['soybean', 'wheat']:
+                current_relax_factor = 0.7  # 흙 배경
+            else:
+                current_relax_factor = 0.3  # 물 배경
+
+        print(
+            f"    [Summary] Crop: {current_crop} | Grid: {current_grid_size}m | Sigma: {current_sigma} | Mask Factor: {current_relax_factor}")
 
         boundary_path = os.path.join(DATA_FOLDER, f"{field_code}_Boundary.zip")
         if os.path.exists(boundary_path):
@@ -349,14 +370,14 @@ def main():
             if len(raw_bins) < N_ZONES + 1:
                 _, raw_bins = pd.qcut(raw_valid['Raw_GNDVI'].rank(method='first'), q=N_ZONES, retbins=True)
 
-            # 결정된 Sigma 적용
             grid = apply_zone_detail_smoothing(grid, value_col='Raw_GNDVI', sigma=current_sigma)
 
             grid['Zone'] = pd.cut(grid['Smooth_Value'], bins=raw_bins, labels=[1, 2, 3, 4, 5], include_lowest=True)
             grid['Zone'] = pd.to_numeric(grid['Zone'], errors='coerce').fillna(0).astype(int)
 
             print("  - Calculating dynamic soil threshold...")
-            soil_threshold = calculate_dynamic_threshold(grid)
+            # [수정] 결정된 마스킹 팩터 전달
+            soil_threshold = calculate_dynamic_threshold(grid, relax_factor=current_relax_factor)
 
             if soil_threshold > -900:
                 print(f"    -> Detected Soil Threshold: {soil_threshold:.4f}")
