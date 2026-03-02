@@ -27,6 +27,19 @@ class BoundaryDetector:
             print(f"    [Error] 바운더리 로드 실패: {e}")
             return None
 
+    # [NEW] SHP 파일 로드 함수 추가
+    def load_boundary_from_shp(self, shp_path):
+        try:
+            gdf = gpd.read_file(shp_path)
+            # DJI ShapeFile은 보통 좌표계 정보(.prj)가 포함되어 있지만, 없을 경우 WGS84로 가정
+            if gdf.crs is None:
+                gdf.crs = "EPSG:4326"
+            print(f"    [Info] 기존 바운더리 재사용: {os.path.basename(shp_path)}")
+            return gdf
+        except Exception as e:
+            print(f"    [Error] SHP 파일 로드 실패: {e}")
+            return None
+
     def detect_boundary_otsu(self, tif_path, crop_type='rice'):
         """
         crop_type: 'rice', 'soybean', 'wheat'
@@ -37,7 +50,6 @@ class BoundaryDetector:
         try:
             with rasterio.open(tif_path) as src:
                 # 1. 다운샘플링
-                # 대면적 필지(새만금 등) 처리 속도를 위해 유지
                 decimation = 4 if (src.width > 2000 or src.height > 2000) else 1
                 out_shape = (src.count, int(src.height / decimation), int(src.width / decimation))
                 data = src.read(1, out_shape=out_shape)
@@ -64,11 +76,8 @@ class BoundaryDetector:
                 except:
                     otsu_thresh = np.mean(valid_pixels)
 
-                # ---------------------------------------------------------
-                # [전략 수정] 임계값 설정
-                # ---------------------------------------------------------
+                # 작물별 임계값 보정
                 if crop_type == 'soybean':
-                    # 콩: 작물이 듬성듬성할 수 있으므로 기준을 더 낮춰서(0.85) 최대한 많이 포함시킴
                     thresh_factor = 0.85
                 elif crop_type == 'wheat':
                     thresh_factor = 0.95
@@ -82,22 +91,12 @@ class BoundaryDetector:
                 # 4. 이진화
                 binary_img = (data > final_thresh)
 
-                # ---------------------------------------------------------
-                # [핵심 수정] 형태학적 처리 (Morphology)
-                # **전략: 끊어진 작물 줄(Row)을 강력하게 연결하는 것이 최우선**
-                # ---------------------------------------------------------
+                # 5. 형태학적 처리 (Morphology)
                 if crop_type == 'soybean':
-                    # 1. Closing (Strong): Opening(삭제)을 먼저 하지 않고, Closing(연결)을 먼저 수행
-                    # 커널 사이즈를 (5,5) 이상으로 키워 고랑 사이를 강제로 연결
                     binary_img = binary_closing(binary_img, structure=np.ones((7, 7)))
-
-                    # 2. Dilation (Expand): 혹시 끊어진 구간이 있을까봐 한 번 더 확장해서 붙임
                     binary_img = binary_dilation(binary_img, structure=np.ones((3, 3)), iterations=2)
-
-                    # 3. Fill Holes: 내부 구멍 메우기 (이제 덩어리가 졌으므로 안전함)
                     binary_img = binary_fill_holes(binary_img)
 
-                    # 4. Largest Component: 가장 큰 덩어리(본밭) 선택
                     labeled_img, num_features = label(binary_img, return_num=True, connectivity=2)
                     if num_features > 0:
                         sizes = np.bincount(labeled_img.ravel())
@@ -105,11 +104,7 @@ class BoundaryDetector:
                         max_label = sizes.argmax()
                         binary_img = (labeled_img == max_label)
 
-                    # 5. Erosion (Restore): 아까 Dilation(2회)으로 불려놓은 것을 다시 깎아서 원래 크기로 복구
-                    # 잡초 가장자리를 정리하는 효과도 있음
                     binary_img = binary_erosion(binary_img, structure=np.ones((3, 3)), iterations=2)
-
-                    # 6. Final Opening: 마지막으로 자잘한 돌기 제거
                     binary_img = binary_opening(binary_img, structure=np.ones((3, 3)))
 
                 elif crop_type == 'wheat':

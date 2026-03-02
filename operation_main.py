@@ -29,14 +29,15 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "sm_data"
+DATA_FOLDER = "data/sm_data"  # [입력] GNDVI 영상이 있는 폴더
+BOUNDARY_FOLDER = "data/ShapeFile"  # [입력] 바운더리(.shp/.zip)가 모여있는 폴더
 OUTPUT_FOLDER = "result/result_final_dji_sm"
-VRA_CSV_PATH = "sm_vra.csv"
+VRA_CSV_PATH = "sm_vra.csv"  # (필요시 vra.csv로 변경하세요)
 
-# 기본값 (CSV에 없을 경우 사용)
-DEFAULT_GRID_SIZE = 1.0
-DEFAULT_CROP = 'rice'
-DEFAULT_SIGMA = 1.35
+# 기본값 (CSV에 없을 경우 사용)s
+# DEFAULT_GRID_SIZE = 1.0
+# DEFAULT_CROP = 'rice'
+# DEFAULT_SIGMA = 1.35
 
 N_ZONES = 5
 VALID_THRESHOLD = -999.0
@@ -285,7 +286,14 @@ def calculate_dynamic_threshold(grid_gdf, relax_factor=0.3):
 # 2. 메인 프로세스
 # ======================================================
 def main():
+    # 폴더 생성
     if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
+
+    # [중요] 바운더리 폴더가 없으면 안내 메시지
+    if not os.path.exists(BOUNDARY_FOLDER):
+        print(f"[Info] '{BOUNDARY_FOLDER}' 폴더가 없습니다. 생성 후 .shp 또는 .zip 파일을 넣어주세요.")
+        os.makedirs(BOUNDARY_FOLDER)
+
     detector = BoundaryDetector()
     vra_calc = VRACalculator(VRA_CSV_PATH)
     tif_files = glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI.tif"))
@@ -327,31 +335,50 @@ def main():
                 current_sigma = DEFAULT_SIGMA
                 print(f"    [Settings] Default Smoothing (Sigma={current_sigma})")
 
-        # [NEW] 4. 마스킹 강도 설정 (CSV 우선 -> 자동 로직 fallback)
+        # 4. 마스킹 강도 설정
         if field_info is not None and 'masking' in field_info and not pd.isna(field_info['masking']):
             try:
                 current_relax_factor = float(field_info['masking'])
                 print(f"    [Settings] Masking Factor loaded from CSV: {current_relax_factor}")
             except:
-                # CSV 값이 잘못되었을 경우 자동 로직으로 fallback
                 if current_crop in ['soybean', 'wheat']:
                     current_relax_factor = 0.7
                 else:
                     current_relax_factor = 0.3
         else:
-            # CSV에 값이 없으면 기존 자동 로직 사용
             if current_crop in ['soybean', 'wheat']:
-                current_relax_factor = 0.7  # 흙 배경
+                current_relax_factor = 0.7
             else:
-                current_relax_factor = 0.3  # 물 배경
+                current_relax_factor = 0.3
 
         print(
             f"    [Summary] Crop: {current_crop} | Grid: {current_grid_size}m | Sigma: {current_sigma} | Mask Factor: {current_relax_factor}")
 
-        boundary_path = os.path.join(DATA_FOLDER, f"{field_code}_Boundary.zip")
-        if os.path.exists(boundary_path):
-            boundary = detector.load_boundary_from_zip(boundary_path)
+        # [수정] 바운더리 로드 우선순위 (별도 폴더 적용)
+
+        # Priority 1: 별도 폴더(ShapeFile) 내의 ZIP
+        zip_boundary_path = os.path.join(BOUNDARY_FOLDER, f"{field_code}_Boundary.zip")
+
+        # Priority 2: 별도 폴더(ShapeFile) 내의 SHP
+        input_shp_path = os.path.join(BOUNDARY_FOLDER, f"{field_code}.shp")
+
+        # Priority 3: 기존 결과 재사용 (OUTPUT_FOLDER의 DJI/ShapeFile) - 유지
+        output_shp_path = os.path.join(OUTPUT_FOLDER, "DJI", "ShapeFile", f"{field_code}.shp")
+
+        if os.path.exists(zip_boundary_path):
+            print(f"    [Boundary] Loading from ShapeFile Folder (ZIP): {zip_boundary_path}")
+            boundary = detector.load_boundary_from_zip(zip_boundary_path)
+
+        elif os.path.exists(input_shp_path):
+            print(f"    [Boundary] Loading from ShapeFile Folder (SHP): {input_shp_path}")
+            boundary = detector.load_boundary_from_shp(input_shp_path)
+
+        elif os.path.exists(output_shp_path):
+            print(f"    [Boundary] Reusing Existing Output SHP file (Priority 3): {output_shp_path}")
+            boundary = detector.load_boundary_from_shp(output_shp_path)
+
         else:
+            print("    [Boundary] Auto-detecting boundary (Priority 4)")
             boundary = detector.detect_boundary_otsu(tif_path, crop_type=current_crop)
 
         if boundary is None: continue
