@@ -35,9 +35,9 @@ OUTPUT_FOLDER = "result/result_final_dji_sm"
 VRA_CSV_PATH = "sm_vra.csv"  # (필요시 vra.csv로 변경하세요)
 
 # 기본값 (CSV에 없을 경우 사용)s
-# DEFAULT_GRID_SIZE = 1.0
-# DEFAULT_CROP = 'rice'
-# DEFAULT_SIGMA = 1.35
+DEFAULT_GRID_SIZE = 1.0
+DEFAULT_CROP = 'rice'
+DEFAULT_SIGMA = 1.35
 
 N_ZONES = 5
 VALID_THRESHOLD = -999.0
