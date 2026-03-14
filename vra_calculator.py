@@ -71,11 +71,11 @@ class VRACalculator:
                 rate_kg_ha = 0
                 zone_total_kg = 0
             else:
-                # Zone 1~5는 정상 계산
-                if field_avg_gndvi > 0:
-                    rate_kg_ha = flat_rate * (1 - ((gndvi - field_avg_gndvi) / field_avg_gndvi) * spread)
-                else:
-                    rate_kg_ha = 0
+                # [수정] Zone 1~5 상대적 변량 계산 (음수/0 근접 시 예외 처리)
+                # 분모가 음수면 산식이 역전되고, 0에 가까우면 수치가 폭발하므로 안전장치 적용
+                safe_denominator = max(abs(field_avg_gndvi), 0.1)
+
+                rate_kg_ha = flat_rate * (1 - ((gndvi - field_avg_gndvi) / safe_denominator) * spread)
 
                 rate_kg_ha = max(rate_kg_ha, 0)
                 zone_total_kg = rate_kg_ha * area_ha
