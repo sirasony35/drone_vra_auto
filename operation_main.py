@@ -400,8 +400,9 @@ def main():
                 if len(raw_bins) < N_ZONES + 1:
                     _, raw_bins = pd.qcut(crop_valid_data.rank(method='first'), q=N_ZONES, retbins=True)
 
+                # astype(float)을 추가하여 안전하게 타입 매칭
                 grid.loc[valid_crop_mask, 'Raw_Zone'] = pd.cut(crop_valid_data, bins=raw_bins, labels=[1, 2, 3, 4, 5],
-                                                               include_lowest=True)
+                                                               include_lowest=True).astype(float)
 
             # Step 3. 스무딩을 통해 정규분포화 하고, 구간별로 모으는 작업
             grid = apply_categorical_zone_smoothing(grid, zone_col='Raw_Zone', sigma=current_sigma,
