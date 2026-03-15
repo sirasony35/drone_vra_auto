@@ -29,18 +29,17 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/vra_data"
-BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/result_final_dji_sm"
-VRA_CSV_PATH = "vra_setting/sm_vra.csv"
+DATA_FOLDER = "data/bd_data"
+BOUNDARY_FOLDER = "data/bd_ShapeFile"
+OUTPUT_FOLDER = "result/result_final_dji_bd"
+VRA_CSV_PATH = "vra_setting/bd_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
-# Sigma는 이제 동적으로 계산되므로 기본 상수는 참고용으로만 쓰입니다.
 
 N_ZONES = 5
 VALID_THRESHOLD = -999.0
-MAJORITY_FILTER_SIZE = 5  # [수정] Pix4D처럼 구역을 크게 모으기 위해 커널 크기 확장
+MAJORITY_FILTER_SIZE = 5  # Pix4D처럼 구역을 크게 모으기 위해 커널 크기 확장
 
 MAX_MASK_THRESHOLD = 0.40
 
@@ -51,13 +50,15 @@ MAX_MASK_THRESHOLD = 0.40
 def get_main_angle(geometry):
     rect = geometry.minimum_rotated_rectangle
     coords = list(rect.exterior.coords)
-    max_len = 0;
+    max_len = 0
     main_angle = 0
     for i in range(len(coords) - 1):
-        dx = coords[i + 1][0] - coords[i][0];
+        dx = coords[i + 1][0] - coords[i][0]
         dy = coords[i + 1][1] - coords[i][1]
         length = math.sqrt(dx ** 2 + dy ** 2)
-        if length > max_len: max_len = length; main_angle = math.degrees(math.atan2(dy, dx))
+        if length > max_len:
+            max_len = length
+            main_angle = math.degrees(math.atan2(dy, dx))
     return main_angle
 
 
@@ -86,14 +87,17 @@ def create_rotated_grid_with_indices(boundary_gdf, grid_size=1.0):
 
 def clip_raster_to_boundary(raster_path, boundary_gdf):
     with rasterio.open(raster_path) as src:
-        if boundary_gdf.crs != src.crs: boundary_gdf = boundary_gdf.to_crs(src.crs)
+        if boundary_gdf.crs != src.crs:
+            boundary_gdf = boundary_gdf.to_crs(src.crs)
         out_image, out_transform = mask(src, boundary_gdf.geometry, crop=True, nodata=np.nan)
         out_meta = src.meta.copy()
-        out_meta.update(
-            {"driver": "GTiff", "height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform,
-             "nodata": np.nan, "dtype": 'float32'})
+        out_meta.update({
+            "driver": "GTiff", "height": out_image.shape[1], "width": out_image.shape[2],
+            "transform": out_transform, "nodata": np.nan, "dtype": 'float32'
+        })
         memfile = MemoryFile()
-        with memfile.open(**out_meta) as dataset: dataset.write(out_image)
+        with memfile.open(**out_meta) as dataset:
+            dataset.write(out_image)
         return memfile
 
 
@@ -115,33 +119,29 @@ def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
     return grid_gdf
 
 
-# [NEW] 동적 스무딩 강도(Sigma) 계산 로직
 def calculate_optimal_sigma(grid_gdf, grid_size, value_col='Raw_GNDVI'):
     base_sigma = 1.35
 
-    # 1. 그리드 크기 보정 (그리드가 커질수록 덜 스무딩해야 뭉개짐 방지)
+    # 1. 그리드 크기 보정
     adjusted_sigma = base_sigma / (grid_size if grid_size > 0 else 1.0)
 
-    # 2. 생육 편차(Standard Deviation) 보정
+    # 2. 생육 편차 보정
     valid_vals = grid_gdf[value_col].dropna()
     if len(valid_vals) > 10:
         std_val = np.std(valid_vals)
-        # 편차가 매우 작으면(너무 균일하면) 스무딩을 약하게 해서 디테일을 살림
         if std_val < 0.02:
             adjusted_sigma *= 0.5
-        # 편차가 너무 크면(노이즈가 많으면) 스무딩을 강하게 해서 안정화
         elif std_val > 0.08:
             adjusted_sigma *= 1.2
 
-    # 최소 0.1, 최대 2.0으로 안전 범위 설정
     return round(max(0.1, min(adjusted_sigma, 2.0)), 2)
 
 
 def calculate_dynamic_threshold(grid_gdf, relax_factor=0.3):
-    # [수정] 스무딩 전 순수 Raw 데이터를 기준으로 마스킹 임계값 도출
     valid_values = grid_gdf['Raw_GNDVI'].dropna()
     valid_values = valid_values[valid_values > 0]
-    if len(valid_values) < 10: return -999
+    if len(valid_values) < 10:
+        return -999
     try:
         raw_otsu = threshold_otsu(valid_values.values)
         relaxed_thresh = raw_otsu * relax_factor
@@ -151,28 +151,23 @@ def calculate_dynamic_threshold(grid_gdf, relax_factor=0.3):
             final_thresh = MAX_MASK_THRESHOLD
         else:
             final_thresh = relaxed_thresh
-        if final_thresh < 0.1: return -999
+
+        if final_thresh < 0.1:
+            return -999
         return final_thresh
     except Exception as e:
         print(f"    [Warning] Otsu calculation failed: {e}")
         return -999
 
 
-# [NEW 핵심] 카테고리(구간) 스무딩 및 모으기 로직
 def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, filter_size=5):
-    """
-    1~5등급으로 사전에 나뉘어진 구역(Zone) 자체를 스무딩하고 다수결로 모아줍니다.
-    Pix4D의 '정규분포 맵핑' 및 '구역 모으기' 효과를 완벽하게 재현합니다.
-    """
     max_col = grid_gdf['mat_col'].max()
     max_row = grid_gdf['mat_row'].max()
     matrix = np.full((max_row + 1, max_col + 1), np.nan)
 
-    # 1. Zone 매트릭스 생성
     for _, row in grid_gdf.iterrows():
         r, c = int(row['mat_row']), int(row['mat_col'])
         val = row[zone_col]
-        # 6등급(흙)이거나 데이터가 없는 곳은 배제
         if pd.isna(val) or val == 6:
             matrix[r, c] = np.nan
         else:
@@ -181,30 +176,26 @@ def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, f
     mask_valid = ~np.isnan(matrix)
 
     filled_matrix = matrix.copy()
-    # [가장자리 보정 트릭] 흙이나 비어있는 가장자리는 중간값(3.0)으로 채워, 스무딩 시 가장자리가 빨간색(1)으로 떨어지는 현상 방지
     filled_matrix[np.isnan(filled_matrix)] = 3.0
 
-    # 2. 가우시안 스무딩 (Zone 1과 5가 인접하면 3으로 모이게 하여 정규분포 형성)
     if sigma >= 0.2:
         smoothed_matrix = gaussian_filter(filled_matrix, sigma=sigma, mode='nearest')
     else:
         smoothed_matrix = filled_matrix
 
-    # 다시 1~5 정수 등급으로 반올림 복구
     rounded_matrix = np.round(smoothed_matrix).astype(int)
     rounded_matrix = np.clip(rounded_matrix, 1, 5)
-    rounded_matrix[~mask_valid] = 0  # 배제했던 영역 복구
+    rounded_matrix[~mask_valid] = 0
 
-    # 3. 다수결(Majority) 필터를 통한 덩어리 묶기 (모으기)
     def mode_func(values):
         valid_vals = values[values > 0]
-        if len(valid_vals) == 0: return 0
+        if len(valid_vals) == 0:
+            return 0
         vals, counts = np.unique(valid_vals, return_counts=True)
         return vals[np.argmax(counts)]
 
     cleaned_matrix = generic_filter(rounded_matrix, mode_func, size=filter_size, mode='constant', cval=0)
 
-    # 4. 결과 매핑
     final_zones = []
     for _, row in grid_gdf.iterrows():
         r, c = int(row['mat_row']), int(row['mat_col'])
@@ -230,7 +221,8 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plot_data = gdf.copy()
     plot_data[zone_col] = pd.to_numeric(plot_data[zone_col], errors='coerce').fillna(0).astype(int)
     plot_data.plot(column=zone_col, cmap=cmap, linewidth=0, edgecolor='none', ax=ax, vmin=1, vmax=6)
-    if boundary_gdf is not None: boundary_gdf.boundary.plot(ax=ax, color='cyan', linewidth=1, alpha=0.7)
+    if boundary_gdf is not None:
+        boundary_gdf.boundary.plot(ax=ax, color='cyan', linewidth=1, alpha=0.7)
 
     legend_patches = [mpatches.Patch(color=c, label=l) for c, l in
                       zip(colors, ["1(High)", "2", "3", "4", "5(Low)", "6(Skip)"])]
@@ -241,8 +233,9 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
-def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_height=0, swath_width=0):
-    print(f"  [Output] Generating DJI Compatible Files (WGS84)...")
+# [업데이트] grid_size 파라미터 추가 및 유동적 해상도 적용
+def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_height=0, swath_width=0, grid_size=1.0):
+    print(f"  [Output] Generating DJI Compatible Files (WGS84) with {grid_size}m grid resolution...")
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
     shp_folder = os.path.join(OUTPUT_FOLDER, "DJI", "ShapeFile")
     os.makedirs(rx_folder, exist_ok=True)
@@ -270,7 +263,10 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     grid_4326 = grid_gdf.to_crs(epsg=4326)
 
     minx, miny, maxx, maxy = grid_4326.total_bounds
-    pixel_size = 0.000005
+
+    # [핵심] 설정한 그리드 크기에 맞춰 처방맵 픽셀 사이즈를 자동 조절 (1m = 약 0.000009도)
+    pixel_size = grid_size * 0.000009
+
     width = int((maxx - minx) / pixel_size)
     height = int((maxy - miny) / pixel_size)
     transform = from_origin(minx, maxy, pixel_size, pixel_size)
@@ -279,18 +275,20 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='float32')
 
     tif_out = os.path.join(rx_folder, f"{filename_base}.tif")
-    out_meta = {"driver": "GTiff", "height": height, "width": width, "count": 1, "dtype": 'float32', "crs": "EPSG:4326",
-                "transform": transform, "nodata": 0}
+    out_meta = {
+        "driver": "GTiff", "height": height, "width": width, "count": 1,
+        "dtype": 'float32', "crs": "EPSG:4326", "transform": transform, "nodata": 0
+    }
     with rasterio.open(tif_out, "w", **out_meta) as dest:
         dest.write(out_image, 1)
 
     tfw_out = os.path.join(rx_folder, f"{filename_base}.tfw")
     with open(tfw_out, "w") as f:
-        f.write(f"{transform.a}\n");
-        f.write(f"{transform.b}\n");
-        f.write(f"{transform.d}\n");
-        f.write(f"{transform.e}\n");
-        f.write(f"{transform.c}\n");
+        f.write(f"{transform.a}\n")
+        f.write(f"{transform.b}\n")
+        f.write(f"{transform.d}\n")
+        f.write(f"{transform.e}\n")
+        f.write(f"{transform.c}\n")
         f.write(f"{transform.f}\n")
     print(f"    - Rx Map saved: {tif_out}")
 
@@ -299,7 +297,8 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
 # 2. 메인 프로세스
 # ======================================================
 def main():
-    if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
+    if not os.path.exists(OUTPUT_FOLDER):
+        os.makedirs(OUTPUT_FOLDER)
 
     if not os.path.exists(BOUNDARY_FOLDER):
         print(f"[Info] '{BOUNDARY_FOLDER}' 폴더가 없습니다. 생성 후 .shp 또는 .zip 파일을 넣어주세요.")
@@ -331,7 +330,7 @@ def main():
         else:
             current_relax_factor = 0.7 if current_crop in ['soybean', 'wheat'] else 0.3
 
-        # 바운더리 로드
+        # 바운더리 로드 우선순위
         zip_boundary_path_1 = os.path.join(BOUNDARY_FOLDER, f"{field_code}_Boundary.zip")
         zip_boundary_path_2 = os.path.join(BOUNDARY_FOLDER, f"{field_code}.zip")
         input_shp_path = os.path.join(BOUNDARY_FOLDER, f"{field_code}.shp")
@@ -349,7 +348,8 @@ def main():
             boundary = detector.detect_boundary_otsu(tif_path, crop_type=current_crop)
 
         if boundary is None: continue
-        if boundary.crs.is_geographic: boundary = boundary.to_crs(epsg=5179)
+        if boundary.crs.is_geographic:
+            boundary = boundary.to_crs(epsg=5179)
 
         try:
             mem_raster = clip_raster_to_boundary(tif_path, boundary)
@@ -375,11 +375,6 @@ def main():
             print(
                 f"    [Summary] Crop: {current_crop} | Grid: {current_grid_size}m | Mask Factor: {current_relax_factor}")
 
-            # -------------------------------------------------------------
-            # [수정된 Zonation 핵심 로직]
-            # 1. 흙 마스킹 -> 2. 사전 분위 분할 -> 3. Zone 스무딩 및 모으기
-            # -------------------------------------------------------------
-
             # Step 1. 맨땅(흙) 6등급 사전 분리
             print("  - Calculating dynamic soil threshold...")
             grid['Raw_Zone'] = np.nan
@@ -400,7 +395,7 @@ def main():
                 if len(raw_bins) < N_ZONES + 1:
                     _, raw_bins = pd.qcut(crop_valid_data.rank(method='first'), q=N_ZONES, retbins=True)
 
-                # astype(float)을 추가하여 안전하게 타입 매칭
+                # [업데이트] Pandas 데이터 타입 충돌 방지를 위한 .astype(float) 적용
                 grid.loc[valid_crop_mask, 'Raw_Zone'] = pd.cut(crop_valid_data, bins=raw_bins, labels=[1, 2, 3, 4, 5],
                                                                include_lowest=True).astype(float)
 
@@ -408,17 +403,17 @@ def main():
             grid = apply_categorical_zone_smoothing(grid, zone_col='Raw_Zone', sigma=current_sigma,
                                                     filter_size=MAJORITY_FILTER_SIZE)
 
-            # -------------------------------------------------------------
-
             valid_zones = grid[grid['Zone'] != 0]
             stats_df = valid_zones.groupby('Zone')
             zone_stats = []
             for z in range(1, 7):
                 if z in stats_df.groups:
                     g = stats_df.get_group(z)
-                    # 비료 계산을 위해 평균값은 스무딩 전 순수 Raw_GNDVI를 사용
-                    zone_stats.append(
-                        {'Zone': z, 'Area_m2': g.geometry.area.sum(), 'Mean_GNDVI': g['Raw_GNDVI'].mean()})
+                    zone_stats.append({
+                        'Zone': z,
+                        'Area_m2': g.geometry.area.sum(),
+                        'Mean_GNDVI': g['Raw_GNDVI'].mean()
+                    })
 
             print("  - Calculating VRA Prescription...")
             vra_df = vra_calc.calculate_prescription(field_code, zone_stats)
@@ -427,19 +422,22 @@ def main():
             f_width = float(field_info.get('width', 0)) if field_info is not None else 0
 
             if vra_df is not None:
-                save_dji_files_wgs84(grid, vra_df, boundary, field_code, flight_height=f_height, swath_width=f_width)
+                # [업데이트] DJI 저장 시 current_grid_size 파라미터 전달
+                save_dji_files_wgs84(grid, vra_df, boundary, field_code, flight_height=f_height, swath_width=f_width,
+                                     grid_size=current_grid_size)
                 vra_out_name = filename.replace(".tif", "_VRA.csv")
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
 
             out_img_name = filename.replace(".tif", "_Result.png")
             save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name), f"Result: {filename}", zone_col='Zone',
                            boundary_gdf=boundary)
+
             mem_raster.close()
             print("  - Processing Complete.")
 
         except Exception as e:
             print(f"  - Error processing {filename}: {e}")
-            import traceback;
+            import traceback
             traceback.print_exc()
 
 
