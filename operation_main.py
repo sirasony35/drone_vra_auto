@@ -29,10 +29,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/test_data"
+DATA_FOLDER = "data/vra_data"
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/result_final_dji_sm_test"
-VRA_CSV_PATH = "vra_setting/test_vra.csv"
+OUTPUT_FOLDER = "result/result_final_dji_sm_rx_5m"
+VRA_CSV_PATH = "vra_setting/sm_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
