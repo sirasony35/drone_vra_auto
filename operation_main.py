@@ -29,10 +29,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/bd_data"
-BOUNDARY_FOLDER = "data/bd_ShapeFile"
-OUTPUT_FOLDER = "result/result_final_dji_bd"
-VRA_CSV_PATH = "vra_setting/bd_vra.csv"
+DATA_FOLDER = "data/test_data"
+BOUNDARY_FOLDER = "data/ShapeFile"
+OUTPUT_FOLDER = "result/result_final_dji_sm_test"
+VRA_CSV_PATH = "vra_setting/test_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -233,7 +233,7 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
-# [업데이트] grid_size 파라미터 추가 및 유동적 해상도 적용
+# [업데이트] grid_size 파라미터 추가 및 위도 기반 실제 거리(Cos 보정) 정밀 계산 로직 적용
 def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_height=0, swath_width=0, grid_size=1.0):
     print(f"  [Output] Generating DJI Compatible Files (WGS84) with {grid_size}m grid resolution...")
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
@@ -264,12 +264,22 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
 
     minx, miny, maxx, maxy = grid_4326.total_bounds
 
-    # [핵심] 설정한 그리드 크기에 맞춰 처방맵 픽셀 사이즈를 자동 조절 (1m = 약 0.000009도)
-    pixel_size = grid_size * 0.000009
+    # [핵심 수정] 위도에 따른 경도 거리 왜곡(찌그러짐) 현상 보정 (Cos 함수 적용)
+    # 1. 필지의 중심 위도 계산
+    center_y = (miny + maxy) / 2.0
 
-    width = int((maxx - minx) / pixel_size)
-    height = int((maxy - miny) / pixel_size)
-    transform = from_origin(minx, maxy, pixel_size, pixel_size)
+    # 2. 위도(Y) 1도는 약 111,320m로 일정
+    pixel_size_y = grid_size / 111320.0
+
+    # 3. 경도(X) 1도는 위도에 따라 좁아지므로 math.cos(위도)로 보정하여 실제 길이를 맞춤
+    pixel_size_x = grid_size / (111320.0 * math.cos(math.radians(center_y)))
+
+    # 너비와 높이 계산 (각각 보정된 픽셀 사이즈 사용)
+    width = int((maxx - minx) / pixel_size_x)
+    height = int((maxy - miny) / pixel_size_y)
+
+    # Transform 적용 시 X축과 Y축의 해상도를 다르게 입력
+    transform = from_origin(minx, maxy, pixel_size_x, pixel_size_y)
 
     shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['Rx_Rate']))
     out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='float32')
@@ -282,14 +292,16 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     with rasterio.open(tif_out, "w", **out_meta) as dest:
         dest.write(out_image, 1)
 
+    # TFW 파일 작성 (TIF 파일의 지리적 위치/크기 정보)
     tfw_out = os.path.join(rx_folder, f"{filename_base}.tfw")
     with open(tfw_out, "w") as f:
-        f.write(f"{transform.a}\n")
-        f.write(f"{transform.b}\n")
-        f.write(f"{transform.d}\n")
-        f.write(f"{transform.e}\n")
-        f.write(f"{transform.c}\n")
-        f.write(f"{transform.f}\n")
+        f.write(f"{transform.a}\n")  # X축 픽셀 크기 (보정됨)
+        f.write(f"{transform.b}\n")  # 회전
+        f.write(f"{transform.d}\n")  # 회전
+        f.write(f"{transform.e}\n")  # Y축 픽셀 크기 (보정됨, 음수)
+        f.write(f"{transform.c}\n")  # 좌상단 X 좌표
+        f.write(f"{transform.f}\n")  # 좌상단 Y 좌표
+
     print(f"    - Rx Map saved: {tif_out}")
 
 
