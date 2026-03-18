@@ -11,6 +11,7 @@ from rasterio.transform import from_origin
 from shapely.geometry import Polygon
 from shapely import affinity
 import math
+import datetime  # 날짜 기반 파일명 생성을 위한 모듈 추가
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
@@ -29,10 +30,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/vra_data"
+DATA_FOLDER = "data/sm_hm_data"
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/result_final_dji_sm_rx_5m"
-VRA_CSV_PATH = "vra_setting/sm_vra.csv"
+OUTPUT_FOLDER = "result/result_dji_hm_new_10m"
+VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -233,7 +234,7 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
-# [업데이트] grid_size 파라미터 추가 및 위도 기반 실제 거리(Cos 보정) 정밀 계산 로직 적용
+# [업데이트] 날짜(MMDD) 및 그리드 크기가 포함된 파일명 생성 적용
 def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_height=0, swath_width=0, grid_size=1.0):
     print(f"  [Output] Generating DJI Compatible Files (WGS84) with {grid_size}m grid resolution...")
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
@@ -241,11 +242,19 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     os.makedirs(rx_folder, exist_ok=True)
     os.makedirs(shp_folder, exist_ok=True)
 
-    if flight_height > 0 and swath_width > 0:
-        filename_base = f"{field_code}_H{flight_height}m_W{swath_width}m"
-    else:
-        filename_base = f"{field_code}"
+    # 1. 오늘 날짜를 MMDD 형식으로 가져오기
+    current_date = datetime.datetime.now().strftime("%m%d")
 
+    # 2. 그리드 사이즈의 소수점 제거 (예: 5.0 -> 5)
+    grid_str = f"{grid_size:g}"
+
+    # 3. 새로운 파일명 형식 적용: 필지코드_그리드m_MMDD
+    if flight_height > 0 and swath_width > 0:
+        filename_base = f"{field_code}_{grid_str}m_H{flight_height}m_W{swath_width}m_{current_date}"
+    else:
+        filename_base = f"{field_code}_{grid_str}m_{current_date}"
+
+    # 바운더리 SHP 파일 저장
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
     boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
     boundary_4326.to_file(boundary_out, encoding='euc-kr')
@@ -264,21 +273,14 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
 
     minx, miny, maxx, maxy = grid_4326.total_bounds
 
-    # [핵심 수정] 위도에 따른 경도 거리 왜곡(찌그러짐) 현상 보정 (Cos 함수 적용)
-    # 1. 필지의 중심 위도 계산
+    # 중심 위도 계산 및 Cos 보정 적용
     center_y = (miny + maxy) / 2.0
-
-    # 2. 위도(Y) 1도는 약 111,320m로 일정
     pixel_size_y = grid_size / 111320.0
-
-    # 3. 경도(X) 1도는 위도에 따라 좁아지므로 math.cos(위도)로 보정하여 실제 길이를 맞춤
     pixel_size_x = grid_size / (111320.0 * math.cos(math.radians(center_y)))
 
-    # 너비와 높이 계산 (각각 보정된 픽셀 사이즈 사용)
     width = int((maxx - minx) / pixel_size_x)
     height = int((maxy - miny) / pixel_size_y)
 
-    # Transform 적용 시 X축과 Y축의 해상도를 다르게 입력
     transform = from_origin(minx, maxy, pixel_size_x, pixel_size_y)
 
     shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['Rx_Rate']))
@@ -292,15 +294,14 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     with rasterio.open(tif_out, "w", **out_meta) as dest:
         dest.write(out_image, 1)
 
-    # TFW 파일 작성 (TIF 파일의 지리적 위치/크기 정보)
     tfw_out = os.path.join(rx_folder, f"{filename_base}.tfw")
     with open(tfw_out, "w") as f:
-        f.write(f"{transform.a}\n")  # X축 픽셀 크기 (보정됨)
-        f.write(f"{transform.b}\n")  # 회전
-        f.write(f"{transform.d}\n")  # 회전
-        f.write(f"{transform.e}\n")  # Y축 픽셀 크기 (보정됨, 음수)
-        f.write(f"{transform.c}\n")  # 좌상단 X 좌표
-        f.write(f"{transform.f}\n")  # 좌상단 Y 좌표
+        f.write(f"{transform.a}\n")
+        f.write(f"{transform.b}\n")
+        f.write(f"{transform.d}\n")
+        f.write(f"{transform.e}\n")
+        f.write(f"{transform.c}\n")
+        f.write(f"{transform.f}\n")
 
     print(f"    - Rx Map saved: {tif_out}")
 
@@ -407,7 +408,7 @@ def main():
                 if len(raw_bins) < N_ZONES + 1:
                     _, raw_bins = pd.qcut(crop_valid_data.rank(method='first'), q=N_ZONES, retbins=True)
 
-                # [업데이트] Pandas 데이터 타입 충돌 방지를 위한 .astype(float) 적용
+                # Pandas 데이터 타입 충돌 방지를 위한 .astype(float) 적용
                 grid.loc[valid_crop_mask, 'Raw_Zone'] = pd.cut(crop_valid_data, bins=raw_bins, labels=[1, 2, 3, 4, 5],
                                                                include_lowest=True).astype(float)
 
@@ -434,7 +435,7 @@ def main():
             f_width = float(field_info.get('width', 0)) if field_info is not None else 0
 
             if vra_df is not None:
-                # [업데이트] DJI 저장 시 current_grid_size 파라미터 전달
+                # DJI 저장 시 current_grid_size 파라미터 전달
                 save_dji_files_wgs84(grid, vra_df, boundary, field_code, flight_height=f_height, swath_width=f_width,
                                      grid_size=current_grid_size)
                 vra_out_name = filename.replace(".tif", "_VRA.csv")
