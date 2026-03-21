@@ -30,10 +30,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/sm_hm_data"
+DATA_FOLDER = "data/hsdata"s
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/result_dji_hm_new_10m"
-VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
+OUTPUT_FOLDER = "result/hs_result_final"
+VRA_CSV_PATH = "vra_setting/hs_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
