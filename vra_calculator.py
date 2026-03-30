@@ -38,6 +38,9 @@ class VRACalculator:
         total_amount_kg = float(field_info['total'])
         spread = float(field_info['spread'])
 
+        # 기체 타입 인식 (csv에 drone_type 열이 없다면 DJI로 기본 인식)
+        drone_type = str(field_info.get('drone_type', 'DJI')).strip().upper() if 'drone_type' in field_info else 'DJI'
+
         # 1. Zone 6(Skip)를 제외한 '실제 살포 면적' 계산
         sprayable_zones = [z for z in zone_stats if z['Zone'] != 6]
 
@@ -55,38 +58,69 @@ class VRACalculator:
         # 평균 시비량 (Flat Rate) -> 살포 가능 면적 기준
         flat_rate = total_amount_kg / total_area_ha
 
-        results = []
-        zone_labels = {
-            1: "빨강(High)", 2: "주황", 3: "노랑", 4: "연두", 5: "초록(Low)",
-            6: "회색(Skip)"
-        }
+        # 기체 타입별 CSV 라벨 동적 할당
+        if drone_type == 'XAG':
+            zone_labels = {
+                1: "빨강(High)", 2: "노랑(Medium)", 3: "초록(Low)",
+                6: "회색(Skip)"
+            }
+        else:
+            zone_labels = {
+                1: "빨강(High)", 2: "주황", 3: "노랑", 4: "연두", 5: "초록(Low)",
+                6: "회색(Skip)"
+            }
+
+        # ---------------------------------------------------------
+        # [STEP 1] 1차 계산: 마이너스 방지(0 강제 보정) 적용된 1차 시비량 계산
+        # ---------------------------------------------------------
+        temp_zones = []
+        preliminary_total_kg = 0.0
 
         for z in zone_stats:
             zone_idx = z['Zone']
             gndvi = z['Mean_GNDVI']
             area_ha = z['Area_m2'] / 10000.0
 
-            # [핵심] Zone 6는 무조건 0kg
             if zone_idx == 6:
                 rate_kg_ha = 0
                 zone_total_kg = 0
             else:
-                # [수정] Zone 1~5 상대적 변량 계산 (음수/0 근접 시 예외 처리)
-                # 분모가 음수면 산식이 역전되고, 0에 가까우면 수치가 폭발하므로 안전장치 적용
                 safe_denominator = max(abs(field_avg_gndvi), 0.1)
-
                 rate_kg_ha = flat_rate * (1 - ((gndvi - field_avg_gndvi) / safe_denominator) * spread)
-
-                rate_kg_ha = max(rate_kg_ha, 0)
+                rate_kg_ha = max(rate_kg_ha, 0)  # 마이너스 비료 방지
                 zone_total_kg = rate_kg_ha * area_ha
+
+            temp_zones.append({
+                'zone_idx': zone_idx,
+                'gndvi': gndvi,
+                'area_ha': area_ha,
+                'rate_kg_ha': rate_kg_ha,
+                'zone_total_kg': zone_total_kg
+            })
+            preliminary_total_kg += zone_total_kg
+
+        # ---------------------------------------------------------
+        # [STEP 2] 2차 계산: 초과/미달분을 원래 목표 총량(Target)에 맞게 완벽 비율 보정
+        # ---------------------------------------------------------
+        correction_factor = 1.0
+        if preliminary_total_kg > 0:
+            correction_factor = total_amount_kg / preliminary_total_kg
+
+        results = []
+        for tz in temp_zones:
+            zone_idx = tz['zone_idx']
+
+            # 보정 계수를 곱하여 최종값 도출 (0인 곳은 곱해도 그대로 0 유지)
+            final_rate_kg_ha = tz['rate_kg_ha'] * correction_factor
+            final_total_kg = tz['zone_total_kg'] * correction_factor
 
             results.append({
                 'Field': field_code,
                 'Zone': f"{zone_idx}({zone_labels.get(zone_idx, '')})",
-                'GNDVI': round(gndvi, 4),
-                'Area(ha)': round(area_ha, 4),
-                'Rate(kg/ha)': round(rate_kg_ha, 2),
-                'Total(kg)': round(zone_total_kg, 2)
+                'GNDVI': round(tz['gndvi'], 4),
+                'Area(ha)': round(tz['area_ha'], 4),
+                'Rate(kg/ha)': round(final_rate_kg_ha, 2),
+                'Total(kg)': round(final_total_kg, 2)
             })
 
         return pd.DataFrame(results)

@@ -32,9 +32,9 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/sm_hm_data"
+DATA_FOLDER = "data/sm_hm_0327"
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/sm_result_xag"
+OUTPUT_FOLDER = "result/sm_result_dji_0330"
 VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
@@ -297,6 +297,7 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     print(f"    - DJI Rx Map saved: {tif_out}")
 
 
+# [NEW] XAG 전용 내보내기 함수 (Folder 노드 추가 완료)
 def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1.0):
     print(f"  [Output] Generating XAG Compatible Files (JSON & KML) with {grid_size}m grid resolution...")
     xag_folder = os.path.join(OUTPUT_FOLDER, "XAG")
@@ -306,11 +307,15 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     grid_str = f"{grid_size:g}"
     filename_base = f"{field_code}_XAG_{grid_str}m_{current_date}"
 
+    # 1. 바운더리를 WGS84로 변환
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
     poly = boundary_4326.union_all()
 
+    # 2. XAG KML 생성
     coords_list = [f"{lon},{lat}" for lon, lat in poly.exterior.coords]
     coords_str = " ".join(coords_list)
+
+    # [수정됨] 매뉴얼 규정에 맞게 <Folder> 노드 추가
     kml_content = f"""<?xml version='1.0' encoding='utf-8'?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
  <Document id="root_doc">
@@ -318,34 +323,41 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
    <SimpleField name="type" type="string"/>
    <SimpleField name="visualType" type="string"/>
   </Schema>
-  <Placemark id="layer.1">
-   <name>{filename_base}</name>
-   <description>Boundaries</description>
-   <Style>
-    <LineStyle><color>ff0000ff</color></LineStyle>
-    <PolyStyle><fill>0</fill></PolyStyle>
-   </Style>
-   <ExtendedData>
-    <SchemaData schemaUrl="#layer">
-     <SimpleData name="type">boundary</SimpleData>
-     <SimpleData name="visualType">BOUNDARY</SimpleData>
-    </SchemaData>
-   </ExtendedData>
-   <Polygon>
-    <outerBoundaryIs>
-     <LinearRing>
-      <coordinates>{coords_str}</coordinates>
-     </LinearRing>
-    </outerBoundaryIs>
-   </Polygon>
-  </Placemark>
+  <Folder>
+   <name>Field_Boundary</name>
+   <Placemark id="layer.1">
+    <name>{filename_base}</name>
+    <description>Boundaries</description>
+    <Style>
+     <LineStyle><color>ff0000ff</color></LineStyle>
+     <PolyStyle><fill>0</fill></PolyStyle>
+    </Style>
+    <ExtendedData>
+     <SchemaData schemaUrl="#layer">
+      <SimpleData name="type">boundary</SimpleData>
+      <SimpleData name="visualType">BOUNDARY</SimpleData>
+     </SchemaData>
+    </ExtendedData>
+    <Polygon>
+     <outerBoundaryIs>
+      <LinearRing>
+       <coordinates>{coords_str}</coordinates>
+      </LinearRing>
+     </outerBoundaryIs>
+    </Polygon>
+   </Placemark>
+  </Folder>
  </Document>
 </kml>"""
+
     kml_out = os.path.join(xag_folder, f"{filename_base}_Boundary.kml")
     with open(kml_out, "w", encoding='utf-8') as f:
         f.write(kml_content)
 
+    # 3. JSON 데이터 생성 준비 (Zone 1,2,3 맵핑)
     grid_4326 = grid_gdf.to_crs(epsg=4326)
+
+    # Zone 6(Skip)이나 0은 배열에서 0으로 표기
     grid_4326['XAG_Zone'] = grid_4326['Zone'].apply(lambda z: z if z in [1, 2, 3] else 0)
 
     minx, miny, maxx, maxy = grid_4326.total_bounds
@@ -357,10 +369,12 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     height = int((maxy - miny) / pixel_size_y)
     transform = from_origin(minx, maxy, pixel_size_x, pixel_size_y)
 
+    # 배열(Array) 생성
     shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['XAG_Zone']))
     out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='int32')
     weight_data = out_image.flatten().tolist()
 
+    # Dosage 레벨 맵핑 (VRA DataFrame 참조)
     data_type_level = []
     for _, row in vra_df.iterrows():
         try:
@@ -371,6 +385,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
         except:
             continue
 
+    # JSON 딕셔너리 조립
     xag_json = {
         "borderWKT": poly.wkt,
         "cellSize": float(grid_size),
