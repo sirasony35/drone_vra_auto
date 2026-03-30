@@ -11,7 +11,9 @@ from rasterio.transform import from_origin
 from shapely.geometry import Polygon
 from shapely import affinity
 import math
-import datetime  # 날짜 기반 파일명 생성을 위한 모듈 추가
+import datetime
+import json
+import uuid
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
@@ -30,18 +32,14 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/hsdata"s
+DATA_FOLDER = "data/sm_hm_data"
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/hs_result_final"
-VRA_CSV_PATH = "vra_setting/hs_vra.csv"
+OUTPUT_FOLDER = "result/sm_result_xag"
+VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
-
-N_ZONES = 5
 VALID_THRESHOLD = -999.0
-MAJORITY_FILTER_SIZE = 5  # Pix4D처럼 구역을 크게 모으기 위해 커널 크기 확장
-
 MAX_MASK_THRESHOLD = 0.40
 
 
@@ -120,13 +118,12 @@ def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
     return grid_gdf
 
 
-def calculate_optimal_sigma(grid_gdf, grid_size, value_col='Raw_GNDVI'):
-    base_sigma = 1.35
+# [핵심 로직 업데이트] 기체 타입에 따라 기본 시그마 값 분기
+def calculate_optimal_sigma(grid_gdf, grid_size, drone_type='DJI', value_col='Raw_GNDVI'):
+    # XAG는 디테일(Pix4D 유사성)을 위해 0.7, DJI는 비행 안정을 위해 1.35
+    base_sigma = 0.7 if drone_type == 'XAG' else 1.35
 
-    # 1. 그리드 크기 보정
     adjusted_sigma = base_sigma / (grid_size if grid_size > 0 else 1.0)
-
-    # 2. 생육 편차 보정
     valid_vals = grid_gdf[value_col].dropna()
     if len(valid_vals) > 10:
         std_val = np.std(valid_vals)
@@ -134,7 +131,6 @@ def calculate_optimal_sigma(grid_gdf, grid_size, value_col='Raw_GNDVI'):
             adjusted_sigma *= 0.5
         elif std_val > 0.08:
             adjusted_sigma *= 1.2
-
     return round(max(0.1, min(adjusted_sigma, 2.0)), 2)
 
 
@@ -146,22 +142,18 @@ def calculate_dynamic_threshold(grid_gdf, relax_factor=0.3):
     try:
         raw_otsu = threshold_otsu(valid_values.values)
         relaxed_thresh = raw_otsu * relax_factor
-        print(f"    [Threshold Info] Raw Otsu: {raw_otsu:.4f} * Factor {relax_factor} = {relaxed_thresh:.4f}")
-
         if relaxed_thresh > MAX_MASK_THRESHOLD:
             final_thresh = MAX_MASK_THRESHOLD
         else:
             final_thresh = relaxed_thresh
-
         if final_thresh < 0.1:
             return -999
         return final_thresh
-    except Exception as e:
-        print(f"    [Warning] Otsu calculation failed: {e}")
+    except Exception:
         return -999
 
 
-def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, filter_size=5):
+def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, filter_size=5, max_zone=5):
     max_col = grid_gdf['mat_col'].max()
     max_row = grid_gdf['mat_row'].max()
     matrix = np.full((max_row + 1, max_col + 1), np.nan)
@@ -175,9 +167,10 @@ def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, f
             matrix[r, c] = val
 
     mask_valid = ~np.isnan(matrix)
-
     filled_matrix = matrix.copy()
-    filled_matrix[np.isnan(filled_matrix)] = 3.0
+
+    middle_zone = 2 if max_zone == 3 else 3
+    filled_matrix[np.isnan(filled_matrix)] = float(middle_zone)
 
     if sigma >= 0.2:
         smoothed_matrix = gaussian_filter(filled_matrix, sigma=sigma, mode='nearest')
@@ -185,7 +178,7 @@ def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, f
         smoothed_matrix = filled_matrix
 
     rounded_matrix = np.round(smoothed_matrix).astype(int)
-    rounded_matrix = np.clip(rounded_matrix, 1, 5)
+    rounded_matrix = np.clip(rounded_matrix, 1, max_zone)
     rounded_matrix[~mask_valid] = 0
 
     def mode_func(values):
@@ -214,19 +207,29 @@ def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, f
     return grid_gdf
 
 
-def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None):
-    colors = ['#FF0000', '#FFA500', '#FFFF00', '#90EE90', '#008000', '#808080']
-    cmap = ListedColormap(colors)
+def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None, max_zone=5):
+    if max_zone == 3:
+        colors = ['#FF0000', '#FFFF00', '#008000', '#808080']
+        labels = ["1(High)", "2(Medium)", "3(Low)", "6(Skip)"]
+        vmin, vmax = 1, 6
+    else:
+        colors = ['#FF0000', '#FFA500', '#FFFF00', '#90EE90', '#008000', '#808080']
+        labels = ["1(High)", "2", "3", "4", "5(Low)", "6(Skip)"]
+        vmin, vmax = 1, 6
 
+    cmap = ListedColormap(colors)
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     plot_data = gdf.copy()
-    plot_data[zone_col] = pd.to_numeric(plot_data[zone_col], errors='coerce').fillna(0).astype(int)
-    plot_data.plot(column=zone_col, cmap=cmap, linewidth=0, edgecolor='none', ax=ax, vmin=1, vmax=6)
+
+    plot_data['plot_zone'] = pd.to_numeric(plot_data[zone_col], errors='coerce').fillna(0).astype(int)
+    if max_zone == 3:
+        plot_data.loc[plot_data['plot_zone'] == 6, 'plot_zone'] = 4
+
+    plot_data.plot(column='plot_zone', cmap=cmap, linewidth=0, edgecolor='none', ax=ax, vmin=1, vmax=len(colors))
     if boundary_gdf is not None:
         boundary_gdf.boundary.plot(ax=ax, color='cyan', linewidth=1, alpha=0.7)
 
-    legend_patches = [mpatches.Patch(color=c, label=l) for c, l in
-                      zip(colors, ["1(High)", "2", "3", "4", "5(Low)", "6(Skip)"])]
+    legend_patches = [mpatches.Patch(color=c, label=l) for c, l in zip(colors, labels)]
     ax.legend(handles=legend_patches, loc='lower right', title="Levels")
     ax.set_title(f"Zonation Map {title_suffix}", fontsize=15)
     ax.set_axis_off()
@@ -234,7 +237,9 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
     plt.close()
 
 
-# [업데이트] 날짜(MMDD) 및 그리드 크기가 포함된 파일명 생성 적용
+# ======================================================
+# 2. DJI & XAG 내보내기 함수
+# ======================================================
 def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_height=0, swath_width=0, grid_size=1.0):
     print(f"  [Output] Generating DJI Compatible Files (WGS84) with {grid_size}m grid resolution...")
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
@@ -242,19 +247,13 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     os.makedirs(rx_folder, exist_ok=True)
     os.makedirs(shp_folder, exist_ok=True)
 
-    # 1. 오늘 날짜를 MMDD 형식으로 가져오기
     current_date = datetime.datetime.now().strftime("%m%d")
-
-    # 2. 그리드 사이즈의 소수점 제거 (예: 5.0 -> 5)
     grid_str = f"{grid_size:g}"
-
-    # 3. 새로운 파일명 형식 적용: 필지코드_그리드m_MMDD
     if flight_height > 0 and swath_width > 0:
-        filename_base = f"{field_code}_{grid_str}m_H{flight_height}m_W{swath_width}m_{current_date}"
+        filename_base = f"{field_code}_DJI_{grid_str}m_H{flight_height}m_W{swath_width}m_{current_date}"
     else:
-        filename_base = f"{field_code}_{grid_str}m_{current_date}"
+        filename_base = f"{field_code}_DJI_{grid_str}m_{current_date}"
 
-    # 바운더리 SHP 파일 저장
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
     boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
     boundary_4326.to_file(boundary_out, encoding='euc-kr')
@@ -272,15 +271,12 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     grid_4326 = grid_gdf.to_crs(epsg=4326)
 
     minx, miny, maxx, maxy = grid_4326.total_bounds
-
-    # 중심 위도 계산 및 Cos 보정 적용
     center_y = (miny + maxy) / 2.0
     pixel_size_y = grid_size / 111320.0
     pixel_size_x = grid_size / (111320.0 * math.cos(math.radians(center_y)))
 
     width = int((maxx - minx) / pixel_size_x)
     height = int((maxy - miny) / pixel_size_y)
-
     transform = from_origin(minx, maxy, pixel_size_x, pixel_size_y)
 
     shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['Rx_Rate']))
@@ -296,25 +292,120 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
 
     tfw_out = os.path.join(rx_folder, f"{filename_base}.tfw")
     with open(tfw_out, "w") as f:
-        f.write(f"{transform.a}\n")
-        f.write(f"{transform.b}\n")
-        f.write(f"{transform.d}\n")
-        f.write(f"{transform.e}\n")
-        f.write(f"{transform.c}\n")
-        f.write(f"{transform.f}\n")
+        for val in [transform.a, transform.b, transform.d, transform.e, transform.c, transform.f]:
+            f.write(f"{val}\n")
+    print(f"    - DJI Rx Map saved: {tif_out}")
 
-    print(f"    - Rx Map saved: {tif_out}")
+
+def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1.0):
+    print(f"  [Output] Generating XAG Compatible Files (JSON & KML) with {grid_size}m grid resolution...")
+    xag_folder = os.path.join(OUTPUT_FOLDER, "XAG")
+    os.makedirs(xag_folder, exist_ok=True)
+
+    current_date = datetime.datetime.now().strftime("%m%d")
+    grid_str = f"{grid_size:g}"
+    filename_base = f"{field_code}_XAG_{grid_str}m_{current_date}"
+
+    boundary_4326 = boundary_gdf.to_crs(epsg=4326)
+    poly = boundary_4326.union_all()
+
+    coords_list = [f"{lon},{lat}" for lon, lat in poly.exterior.coords]
+    coords_str = " ".join(coords_list)
+    kml_content = f"""<?xml version='1.0' encoding='utf-8'?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+ <Document id="root_doc">
+  <Schema id="layer" name="layer">
+   <SimpleField name="type" type="string"/>
+   <SimpleField name="visualType" type="string"/>
+  </Schema>
+  <Placemark id="layer.1">
+   <name>{filename_base}</name>
+   <description>Boundaries</description>
+   <Style>
+    <LineStyle><color>ff0000ff</color></LineStyle>
+    <PolyStyle><fill>0</fill></PolyStyle>
+   </Style>
+   <ExtendedData>
+    <SchemaData schemaUrl="#layer">
+     <SimpleData name="type">boundary</SimpleData>
+     <SimpleData name="visualType">BOUNDARY</SimpleData>
+    </SchemaData>
+   </ExtendedData>
+   <Polygon>
+    <outerBoundaryIs>
+     <LinearRing>
+      <coordinates>{coords_str}</coordinates>
+     </LinearRing>
+    </outerBoundaryIs>
+   </Polygon>
+  </Placemark>
+ </Document>
+</kml>"""
+    kml_out = os.path.join(xag_folder, f"{filename_base}_Boundary.kml")
+    with open(kml_out, "w", encoding='utf-8') as f:
+        f.write(kml_content)
+
+    grid_4326 = grid_gdf.to_crs(epsg=4326)
+    grid_4326['XAG_Zone'] = grid_4326['Zone'].apply(lambda z: z if z in [1, 2, 3] else 0)
+
+    minx, miny, maxx, maxy = grid_4326.total_bounds
+    center_y = (miny + maxy) / 2.0
+    pixel_size_y = grid_size / 111320.0
+    pixel_size_x = grid_size / (111320.0 * math.cos(math.radians(center_y)))
+
+    width = int((maxx - minx) / pixel_size_x)
+    height = int((maxy - miny) / pixel_size_y)
+    transform = from_origin(minx, maxy, pixel_size_x, pixel_size_y)
+
+    shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['XAG_Zone']))
+    out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='int32')
+    weight_data = out_image.flatten().tolist()
+
+    data_type_level = []
+    for _, row in vra_df.iterrows():
+        try:
+            zone_idx = int(str(row['Zone']).split('(')[0])
+            rate_val = float(row['Rate(kg/ha)'])
+            if zone_idx in [1, 2, 3]:
+                data_type_level.append({"dosage": rate_val, "level": zone_idx})
+        except:
+            continue
+
+    xag_json = {
+        "borderWKT": poly.wkt,
+        "cellSize": float(grid_size),
+        "columns": width,
+        "dataType": 3,
+        "dataTypeLevel": data_type_level,
+        "guid": str(uuid.uuid4()),
+        "name": filename_base,
+        "originEndLat": maxy,
+        "originEndLng": maxx,
+        "originLat": miny,
+        "originLng": minx,
+        "rotation": 0,
+        "rows": height,
+        "source": "Python_VRA",
+        "version": 1,
+        "weightData": weight_data,
+        "workType": 2
+    }
+
+    json_out = os.path.join(xag_folder, f"{filename_base}_Prescription.json")
+    with open(json_out, "w", encoding='utf-8') as f:
+        json.dump(xag_json, f, indent=4)
+
+    print(f"    - XAG KML saved: {kml_out}")
+    print(f"    - XAG JSON saved: {json_out}")
 
 
 # ======================================================
-# 2. 메인 프로세스
+# 3. 메인 프로세스
 # ======================================================
 def main():
     if not os.path.exists(OUTPUT_FOLDER):
         os.makedirs(OUTPUT_FOLDER)
-
     if not os.path.exists(BOUNDARY_FOLDER):
-        print(f"[Info] '{BOUNDARY_FOLDER}' 폴더가 없습니다. 생성 후 .shp 또는 .zip 파일을 넣어주세요.")
         os.makedirs(BOUNDARY_FOLDER)
 
     detector = BoundaryDetector()
@@ -327,6 +418,13 @@ def main():
         print(f"\n>>> Processing: {filename} (Field Code: {field_code})")
 
         field_info = vra_calc.get_field_info(field_code)
+
+        # [핵심] 기체 타입 인식
+        drone_type = str(field_info.get('drone_type', 'DJI')).strip().upper() if field_info is not None else 'DJI'
+
+        # 기체별 등급 및 필터 사이즈 동적 할당
+        current_n_zones = 3 if drone_type == 'XAG' else 5
+        current_filter_size = 3 if drone_type == 'XAG' else 5
 
         current_crop = field_info['crop'] if field_info is not None and 'crop' in field_info else DEFAULT_CROP
         try:
@@ -343,7 +441,6 @@ def main():
         else:
             current_relax_factor = 0.7 if current_crop in ['soybean', 'wheat'] else 0.3
 
-        # 바운더리 로드 우선순위
         zip_boundary_path_1 = os.path.join(BOUNDARY_FOLDER, f"{field_code}_Boundary.zip")
         zip_boundary_path_2 = os.path.join(BOUNDARY_FOLDER, f"{field_code}.zip")
         input_shp_path = os.path.join(BOUNDARY_FOLDER, f"{field_code}.shp")
@@ -366,59 +463,60 @@ def main():
 
         try:
             mem_raster = clip_raster_to_boundary(tif_path, boundary)
-
             grid = create_rotated_grid_with_indices(boundary, grid_size=current_grid_size)
             grid = calculate_grid_mean_stats(grid, mem_raster, col_name='Raw_GNDVI')
 
             raw_valid = grid.dropna(subset=['Raw_GNDVI'])
             if len(raw_valid) == 0: continue
 
-            # 동적 스무딩(Sigma) 계산
+            # [업데이트] Sigma 동적 계산 시 drone_type 넘겨주기
             if field_info is not None and 'sigma' in field_info and not pd.isna(field_info['sigma']):
                 try:
                     current_sigma = float(field_info['sigma'])
                     print(f"    [Settings] Sigma loaded from CSV: {current_sigma}")
                 except:
-                    current_sigma = calculate_optimal_sigma(grid, current_grid_size)
+                    current_sigma = calculate_optimal_sigma(grid, current_grid_size, drone_type=drone_type)
                     print(f"    [Settings] Auto Dynamic Sigma: {current_sigma}")
             else:
-                current_sigma = calculate_optimal_sigma(grid, current_grid_size)
+                current_sigma = calculate_optimal_sigma(grid, current_grid_size, drone_type=drone_type)
                 print(f"    [Settings] Auto Dynamic Sigma: {current_sigma}")
 
             print(
-                f"    [Summary] Crop: {current_crop} | Grid: {current_grid_size}m | Mask Factor: {current_relax_factor}")
+                f"    [Summary] Drone: {drone_type} | Zones: {current_n_zones} | Filter: {current_filter_size} | Grid: {current_grid_size}m")
 
-            # Step 1. 맨땅(흙) 6등급 사전 분리
-            print("  - Calculating dynamic soil threshold...")
             grid['Raw_Zone'] = np.nan
             soil_threshold = calculate_dynamic_threshold(grid, relax_factor=current_relax_factor)
             if soil_threshold > -900:
-                print(f"    -> Detected Soil Threshold: {soil_threshold:.4f}")
                 mask_bare = grid['Raw_GNDVI'] < soil_threshold
                 grid.loc[mask_bare, 'Raw_Zone'] = 6
             else:
                 mask_bare = pd.Series(False, index=grid.index)
 
-            # Step 2. 사전에 분위별로 구간화 (흙을 제외한 작물 영역만 20% 단위로 5등분)
             valid_crop_mask = grid['Raw_GNDVI'].notna() & (~mask_bare)
             crop_valid_data = grid.loc[valid_crop_mask, 'Raw_GNDVI']
 
             if len(crop_valid_data) > 0:
-                _, raw_bins = pd.qcut(crop_valid_data, q=N_ZONES, retbins=True, duplicates='drop')
-                if len(raw_bins) < N_ZONES + 1:
-                    _, raw_bins = pd.qcut(crop_valid_data.rank(method='first'), q=N_ZONES, retbins=True)
+                _, raw_bins = pd.qcut(crop_valid_data, q=current_n_zones, retbins=True, duplicates='drop')
+                if len(raw_bins) < current_n_zones + 1:
+                    _, raw_bins = pd.qcut(crop_valid_data.rank(method='first'), q=current_n_zones, retbins=True)
 
-                # Pandas 데이터 타입 충돌 방지를 위한 .astype(float) 적용
-                grid.loc[valid_crop_mask, 'Raw_Zone'] = pd.cut(crop_valid_data, bins=raw_bins, labels=[1, 2, 3, 4, 5],
+                labels_list = list(range(1, current_n_zones + 1))
+                grid.loc[valid_crop_mask, 'Raw_Zone'] = pd.cut(crop_valid_data, bins=raw_bins, labels=labels_list,
                                                                include_lowest=True).astype(float)
 
-            # Step 3. 스무딩을 통해 정규분포화 하고, 구간별로 모으는 작업
-            grid = apply_categorical_zone_smoothing(grid, zone_col='Raw_Zone', sigma=current_sigma,
-                                                    filter_size=MAJORITY_FILTER_SIZE)
+            # [업데이트] 스무딩 함수에 current_filter_size 전달
+            grid = apply_categorical_zone_smoothing(
+                grid,
+                zone_col='Raw_Zone',
+                sigma=current_sigma,
+                filter_size=current_filter_size,
+                max_zone=current_n_zones
+            )
 
             valid_zones = grid[grid['Zone'] != 0]
             stats_df = valid_zones.groupby('Zone')
             zone_stats = []
+
             for z in range(1, 7):
                 if z in stats_df.groups:
                     g = stats_df.get_group(z)
@@ -435,15 +533,18 @@ def main():
             f_width = float(field_info.get('width', 0)) if field_info is not None else 0
 
             if vra_df is not None:
-                # DJI 저장 시 current_grid_size 파라미터 전달
-                save_dji_files_wgs84(grid, vra_df, boundary, field_code, flight_height=f_height, swath_width=f_width,
-                                     grid_size=current_grid_size)
-                vra_out_name = filename.replace(".tif", "_VRA.csv")
+                if drone_type == 'XAG':
+                    save_xag_files_wgs84(grid, vra_df, boundary, field_code, grid_size=current_grid_size)
+                else:
+                    save_dji_files_wgs84(grid, vra_df, boundary, field_code, flight_height=f_height,
+                                         swath_width=f_width, grid_size=current_grid_size)
+
+                vra_out_name = f"{field_code}_{drone_type}_VRA.csv"
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
 
-            out_img_name = filename.replace(".tif", "_Result.png")
-            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name), f"Result: {filename}", zone_col='Zone',
-                           boundary_gdf=boundary)
+            out_img_name = f"{field_code}_{drone_type}_Result.png"
+            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name), f"Result: {field_code} ({drone_type})",
+                           zone_col='Zone', boundary_gdf=boundary, max_zone=current_n_zones)
 
             mem_raster.close()
             print("  - Processing Complete.")

@@ -34,7 +34,7 @@ class BoundaryDetector:
             # DJI ShapeFile은 보통 좌표계 정보(.prj)가 포함되어 있지만, 없을 경우 WGS84로 가정
             if gdf.crs is None:
                 gdf.crs = "EPSG:4326"
-            print(f"    [Info] 기존 바운더리 재사용: {os.path.basename(shp_path)}")
+            print(f"    [Info] 바운더리 로드 성공: {os.path.basename(shp_path)}")
             return gdf
         except Exception as e:
             print(f"    [Error] SHP 파일 로드 실패: {e}")
