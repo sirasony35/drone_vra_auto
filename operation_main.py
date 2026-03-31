@@ -297,7 +297,7 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     print(f"    - DJI Rx Map saved: {tif_out}")
 
 
-# [NEW] XAG 전용 내보내기 함수 (Folder 노드 추가 완료)
+# [NEW] XAG 전용 내보내기 함수 (수학적 격자 보정 및 Pix4D 완벽 위장 버전 - math 에러 수정완료)
 def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1.0):
     print(f"  [Output] Generating XAG Compatible Files (JSON & KML) with {grid_size}m grid resolution...")
     xag_folder = os.path.join(OUTPUT_FOLDER, "XAG")
@@ -307,15 +307,24 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     grid_str = f"{grid_size:g}"
     filename_base = f"{field_code}_XAG_{grid_str}m_{current_date}"
 
-    # 1. 바운더리를 WGS84로 변환
+    # 1. 바운더리를 WGS84로 변환 및 멀티폴리곤 강제 병합
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
-    poly = boundary_4326.union_all()
+    geom = boundary_4326.union_all()
+    if geom.geom_type == 'MultiPolygon':
+        geom = max(geom.geoms, key=lambda a: a.area)
+
+    # KML 및 WKT 좌표 포맷팅 (소수점 8자리, 띄어쓰기 엄격 통제)
+    def format_coords_wkt(coords):
+        return ",".join([f"{lon:.8f} {lat:.8f}" for lon, lat in coords])
+
+    kml_coords = " ".join([f"{lon:.8f},{lat:.8f}" for lon, lat in geom.exterior.coords])
+
+    wkt_str = f"POLYGON(({format_coords_wkt(geom.exterior.coords)})"
+    for interior in geom.interiors:
+        wkt_str += f",({format_coords_wkt(interior.coords)})"
+    wkt_str += ")"
 
     # 2. XAG KML 생성
-    coords_list = [f"{lon},{lat}" for lon, lat in poly.exterior.coords]
-    coords_str = " ".join(coords_list)
-
-    # [수정됨] 매뉴얼 규정에 맞게 <Folder> 노드 추가
     kml_content = f"""<?xml version='1.0' encoding='utf-8'?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
  <Document id="root_doc">
@@ -341,7 +350,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     <Polygon>
      <outerBoundaryIs>
       <LinearRing>
-       <coordinates>{coords_str}</coordinates>
+       <coordinates>{kml_coords}</coordinates>
       </LinearRing>
      </outerBoundaryIs>
     </Polygon>
@@ -349,15 +358,12 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
   </Folder>
  </Document>
 </kml>"""
-
     kml_out = os.path.join(xag_folder, f"{filename_base}_Boundary.kml")
     with open(kml_out, "w", encoding='utf-8') as f:
         f.write(kml_content)
 
-    # 3. JSON 데이터 생성 준비 (Zone 1,2,3 맵핑)
+    # 3. JSON 데이터 생성 및 [수학적 격자 오차 완벽 보정]
     grid_4326 = grid_gdf.to_crs(epsg=4326)
-
-    # Zone 6(Skip)이나 0은 배열에서 0으로 표기
     grid_4326['XAG_Zone'] = grid_4326['Zone'].apply(lambda z: z if z in [1, 2, 3] else 0)
 
     minx, miny, maxx, maxy = grid_4326.total_bounds
@@ -365,25 +371,62 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     pixel_size_y = grid_size / 111320.0
     pixel_size_x = grid_size / (111320.0 * math.cos(math.radians(center_y)))
 
-    width = int((maxx - minx) / pixel_size_x)
-    height = int((maxy - miny) / pixel_size_y)
+    # [수정] 문제가 되었던 내부 import math 줄을 삭제했습니다.
+    # 파일 맨 위에 있는 전역 import math를 그대로 사용합니다.
+    width = math.ceil((maxx - minx) / pixel_size_x)
+    height = math.ceil((maxy - miny) / pixel_size_y)
+
+    # 계산된 가로/세로 칸 수에 맞게 전체 Bounding Box 좌표를 역산 (오차 0%)
+    exact_maxx = minx + (width * pixel_size_x)
+    exact_miny = maxy - (height * pixel_size_y)
+
     transform = from_origin(minx, maxy, pixel_size_x, pixel_size_y)
 
-    # 배열(Array) 생성
-    shapes = ((geom, value) for geom, value in zip(grid_4326.geometry, grid_4326['XAG_Zone']))
+    shapes = ((g, value) for g, value in zip(grid_4326.geometry, grid_4326['XAG_Zone']))
     out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='int32')
     weight_data = out_image.flatten().tolist()
 
-    # Dosage 레벨 맵핑 (VRA DataFrame 참조)
     data_type_level = []
     for _, row in vra_df.iterrows():
         try:
             zone_idx = int(str(row['Zone']).split('(')[0])
             rate_val = float(row['Rate(kg/ha)'])
             if zone_idx in [1, 2, 3]:
-                data_type_level.append({"dosage": rate_val, "level": zone_idx})
+                # [핵심 수정] XAG의 dosage 단위(g/m²)에 맞게 kg/ha 값을 10으로 나눔
+                dosage_g_m2 = rate_val / 10.0
+                data_type_level.append({"dosage": round(dosage_g_m2, 2), "level": zone_idx})
         except:
             continue
+
+    cell_size_val = int(grid_size) if grid_size == int(grid_size) else float(grid_size)
+
+    # JSON 딕셔너리 조립 (Pix4D와 완벽하게 동일한 구조)
+    xag_json = {
+        "borderWKT": wkt_str,
+        "cellSize": cell_size_val,
+        "columns": width,
+        "dataType": 3,
+        "dataTypeLevel": data_type_level,
+        "guid": str(uuid.uuid4()),
+        "name": filename_base,
+        "originEndLat": float(f"{maxy:.14f}"),
+        "originEndLng": float(f"{exact_maxx:.14f}"),
+        "originLat": float(f"{exact_miny:.14f}"),
+        "originLng": float(f"{minx:.14f}"),
+        "rotation": 0,
+        "rows": height,
+        "source": "Pix4D",
+        "version": 1,
+        "weightData": weight_data,
+        "workType": 2
+    }
+
+    json_out = os.path.join(xag_folder, f"{filename_base}_Prescription.json")
+    with open(json_out, "w", encoding='utf-8') as f:
+        json.dump(xag_json, f, indent=4)
+
+    print(f"    - XAG KML saved: {kml_out}")
+    print(f"    - XAG JSON saved: {json_out}")
 
     # JSON 딕셔너리 조립
     xag_json = {
