@@ -71,10 +71,13 @@ class VRACalculator:
             }
 
         # ---------------------------------------------------------
-        # [STEP 1] 1차 계산: 마이너스 방지(0 강제 보정) 적용된 1차 시비량 계산
+        # [STEP 1] 1차 계산: 최소 살포량(Base Rate) 보장 적용된 1차 시비량 계산
         # ---------------------------------------------------------
+        # 생육이 아무리 좋아도 최소 50kg/ha 이상은 주도록 하한선 설정
+        MIN_RATE_KG_HA = 50.0
+
         temp_zones = []
-        preliminary_total_kg = 0.0
+        preliminary_total_kg = 0.0  # <--- 아까 에러가 났던, 꼭 필요한 변수 초기화 부분입니다!
 
         for z in zone_stats:
             zone_idx = z['Zone']
@@ -87,7 +90,9 @@ class VRACalculator:
             else:
                 safe_denominator = max(abs(field_avg_gndvi), 0.1)
                 rate_kg_ha = flat_rate * (1 - ((gndvi - field_avg_gndvi) / safe_denominator) * spread)
-                rate_kg_ha = max(rate_kg_ha, 0)  # 마이너스 비료 방지
+
+                # 0 대신 설정한 하한선(50kg/ha)으로 강제 끌어올림!
+                rate_kg_ha = max(rate_kg_ha, MIN_RATE_KG_HA)
                 zone_total_kg = rate_kg_ha * area_ha
 
             temp_zones.append({

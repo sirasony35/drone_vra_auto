@@ -32,10 +32,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/sm_hm_0327"
+DATA_FOLDER = "data/xag_test_data"
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/sm_result_dji_0330"
-VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
+OUTPUT_FOLDER = "result/xag_result_0406"
+VRA_CSV_PATH = "vra_setting/gj_wol_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -61,6 +61,7 @@ def get_main_angle(geometry):
     return main_angle
 
 
+# [NEW] 가장자리 낭비 방지 로직이 적용된 그리드 생성 함수
 def create_rotated_grid_with_indices(boundary_gdf, grid_size=1.0):
     boundary_geom = boundary_gdf.union_all()
     rotation_angle = get_main_angle(boundary_geom)
@@ -76,12 +77,20 @@ def create_rotated_grid_with_indices(boundary_gdf, grid_size=1.0):
             poly = Polygon([(x, y), (x + grid_size, y), (x + grid_size, y + grid_size), (x, y + grid_size)])
             polygons.append(poly)
             indices.append((c_idx, r_idx))
+
     grid_gdf = gpd.GeoDataFrame({'geometry': polygons}, crs=boundary_gdf.crs)
     idx_df = pd.DataFrame(indices, columns=['mat_col', 'mat_row'])
     grid_gdf = pd.concat([grid_gdf, idx_df], axis=1)
     grid_gdf['geometry'] = grid_gdf['geometry'].apply(lambda g: affinity.rotate(g, rotation_angle, origin=centroid))
-    intersects_mask = grid_gdf.intersects(boundary_geom)
-    return grid_gdf[intersects_mask].copy().reset_index(drop=True)
+
+    # [핵심] 오버랩 비율 계산: 그리드 면적의 40% 이상이 바운더리 내부에 있을 때만 살포 구역으로 포함
+    intersection_areas = grid_gdf.intersection(boundary_geom).area
+    grid_areas = grid_gdf.area
+    overlap_ratio = intersection_areas / grid_areas
+
+    valid_mask = overlap_ratio >= 0.4
+
+    return grid_gdf[valid_mask].copy().reset_index(drop=True)
 
 
 def clip_raster_to_boundary(raster_path, boundary_gdf):
@@ -118,7 +127,6 @@ def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
     return grid_gdf
 
 
-# [핵심 로직 업데이트] 기체 타입에 따라 기본 시그마 값 분기
 def calculate_optimal_sigma(grid_gdf, grid_size, drone_type='DJI', value_col='Raw_GNDVI'):
     # XAG는 디테일(Pix4D 유사성)을 위해 0.7, DJI는 비행 안정을 위해 1.35
     base_sigma = 0.7 if drone_type == 'XAG' else 1.35
@@ -297,7 +305,6 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     print(f"    - DJI Rx Map saved: {tif_out}")
 
 
-# [NEW] XAG 전용 내보내기 함수 (수학적 격자 보정 및 Pix4D 완벽 위장 버전 - math 에러 수정완료)
 def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1.0):
     print(f"  [Output] Generating XAG Compatible Files (JSON & KML) with {grid_size}m grid resolution...")
     xag_folder = os.path.join(OUTPUT_FOLDER, "XAG")
@@ -362,7 +369,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     with open(kml_out, "w", encoding='utf-8') as f:
         f.write(kml_content)
 
-    # 3. JSON 데이터 생성 및 [수학적 격자 오차 완벽 보정]
+    # 3. JSON 데이터 생성 및 수학적 격자 오차 완벽 보정
     grid_4326 = grid_gdf.to_crs(epsg=4326)
     grid_4326['XAG_Zone'] = grid_4326['Zone'].apply(lambda z: z if z in [1, 2, 3] else 0)
 
@@ -371,8 +378,6 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     pixel_size_y = grid_size / 111320.0
     pixel_size_x = grid_size / (111320.0 * math.cos(math.radians(center_y)))
 
-    # [수정] 문제가 되었던 내부 import math 줄을 삭제했습니다.
-    # 파일 맨 위에 있는 전역 import math를 그대로 사용합니다.
     width = math.ceil((maxx - minx) / pixel_size_x)
     height = math.ceil((maxy - miny) / pixel_size_y)
 
@@ -392,7 +397,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
             zone_idx = int(str(row['Zone']).split('(')[0])
             rate_val = float(row['Rate(kg/ha)'])
             if zone_idx in [1, 2, 3]:
-                # [핵심 수정] XAG의 dosage 단위(g/m²)에 맞게 kg/ha 값을 10으로 나눔
+                # XAG의 dosage 단위(g/m²)에 맞게 kg/ha 값을 10으로 나눔
                 dosage_g_m2 = rate_val / 10.0
                 data_type_level.append({"dosage": round(dosage_g_m2, 2), "level": zone_idx})
         except:
@@ -400,7 +405,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
 
     cell_size_val = int(grid_size) if grid_size == int(grid_size) else float(grid_size)
 
-    # JSON 딕셔너리 조립 (Pix4D와 완벽하게 동일한 구조)
+    # JSON 딕셔너리 조립 (Poly 오류 일으키던 중복 블록 삭제 완료)
     xag_json = {
         "borderWKT": wkt_str,
         "cellSize": cell_size_val,
@@ -416,34 +421,6 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
         "rotation": 0,
         "rows": height,
         "source": "Pix4D",
-        "version": 1,
-        "weightData": weight_data,
-        "workType": 2
-    }
-
-    json_out = os.path.join(xag_folder, f"{filename_base}_Prescription.json")
-    with open(json_out, "w", encoding='utf-8') as f:
-        json.dump(xag_json, f, indent=4)
-
-    print(f"    - XAG KML saved: {kml_out}")
-    print(f"    - XAG JSON saved: {json_out}")
-
-    # JSON 딕셔너리 조립
-    xag_json = {
-        "borderWKT": poly.wkt,
-        "cellSize": float(grid_size),
-        "columns": width,
-        "dataType": 3,
-        "dataTypeLevel": data_type_level,
-        "guid": str(uuid.uuid4()),
-        "name": filename_base,
-        "originEndLat": maxy,
-        "originEndLng": maxx,
-        "originLat": miny,
-        "originLng": minx,
-        "rotation": 0,
-        "rows": height,
-        "source": "Python_VRA",
         "version": 1,
         "weightData": weight_data,
         "workType": 2
@@ -485,11 +462,17 @@ def main():
         current_filter_size = 3 if drone_type == 'XAG' else 5
 
         current_crop = field_info['crop'] if field_info is not None and 'crop' in field_info else DEFAULT_CROP
+
         try:
             current_grid_size = float(
                 field_info['grid_size']) if field_info is not None and 'grid_size' in field_info else DEFAULT_GRID_SIZE
         except:
             current_grid_size = DEFAULT_GRID_SIZE
+
+        # [NEW] XAG 기체 감지 시 CSV 설정값 무시하고 무조건 5m로 강제 고정
+        if drone_type == 'XAG':
+            current_grid_size = 5.0
+            print(f"    [Info] XAG 기체 감지: 그리드 크기를 5.0m로 강제 고정합니다.")
 
         if field_info is not None and 'masking' in field_info and not pd.isna(field_info['masking']):
             try:
@@ -527,7 +510,6 @@ def main():
             raw_valid = grid.dropna(subset=['Raw_GNDVI'])
             if len(raw_valid) == 0: continue
 
-            # [업데이트] Sigma 동적 계산 시 drone_type 넘겨주기
             if field_info is not None and 'sigma' in field_info and not pd.isna(field_info['sigma']):
                 try:
                     current_sigma = float(field_info['sigma'])
@@ -562,7 +544,6 @@ def main():
                 grid.loc[valid_crop_mask, 'Raw_Zone'] = pd.cut(crop_valid_data, bins=raw_bins, labels=labels_list,
                                                                include_lowest=True).astype(float)
 
-            # [업데이트] 스무딩 함수에 current_filter_size 전달
             grid = apply_categorical_zone_smoothing(
                 grid,
                 zone_col='Raw_Zone',
