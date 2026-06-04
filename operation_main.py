@@ -32,10 +32,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/xag_test_data"
+DATA_FOLDER = "data/sm_hm_test_data"
 BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/xag_result_0406"
-VRA_CSV_PATH = "vra_setting/gj_wol_vra.csv"
+OUTPUT_FOLDER = "result/result_0604"
+VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -83,12 +83,12 @@ def create_rotated_grid_with_indices(boundary_gdf, grid_size=1.0):
     grid_gdf = pd.concat([grid_gdf, idx_df], axis=1)
     grid_gdf['geometry'] = grid_gdf['geometry'].apply(lambda g: affinity.rotate(g, rotation_angle, origin=centroid))
 
-    # [핵심] 오버랩 비율 계산: 그리드 면적의 40% 이상이 바운더리 내부에 있을 때만 살포 구역으로 포함
     intersection_areas = grid_gdf.intersection(boundary_geom).area
     grid_areas = grid_gdf.area
     overlap_ratio = intersection_areas / grid_areas
 
-    valid_mask = overlap_ratio >= 0.4
+    # [UPDATE] 바운더리 밖으로 삐져나가는 픽셀을 완전히 제거하여 비료 모자람 해결 (95% 이상 겹칠 때만 포함)
+    valid_mask = overlap_ratio >= 0.95
 
     return grid_gdf[valid_mask].copy().reset_index(drop=True)
 
