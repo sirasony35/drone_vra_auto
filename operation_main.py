@@ -32,10 +32,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/sm_hm_test_data"
-BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/result_0604"
-VRA_CSV_PATH = "vra_setting/sm_hm_vra.csv"
+DATA_FOLDER = "data/gj_data"
+BOUNDARY_FOLDER = "data/gj_boundary"
+OUTPUT_FOLDER = "result/gj_result_0705"
+VRA_CSV_PATH = "vra_setting/gj_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -59,6 +59,18 @@ def get_main_angle(geometry):
             max_len = length
             main_angle = math.degrees(math.atan2(dy, dx))
     return main_angle
+
+
+def find_boundary_zip(boundary_folder, field_code):
+    """경계 폴더에서 필지코드에 해당하는 zip 파일 탐색.
+    'GJR1.zip', 'GJR1_Boundary.zip', 'GJR1_boundary.zip' 등 네이밍 변형과
+    대소문자 차이를 모두 허용한다 (파일명 첫 토큰 == 필지코드 기준)."""
+    fc = str(field_code).lower()
+    for zip_path in sorted(glob.glob(os.path.join(boundary_folder, "*.zip"))):
+        base = os.path.splitext(os.path.basename(zip_path))[0].lower()
+        if base == fc or base.split("_")[0] == fc:
+            return zip_path
+    return None
 
 
 # [NEW] 가장자리 낭비 방지 로직이 적용된 그리드 생성 함수
@@ -258,13 +270,23 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     current_date = datetime.datetime.now().strftime("%m%d")
     grid_str = f"{grid_size:g}"
     if flight_height > 0 and swath_width > 0:
-        filename_base = f"{field_code}_DJI_{grid_str}m_H{flight_height}m_W{swath_width}m_{current_date}"
+        filename_base = f"{field_code}_DJI_{grid_str}m_H{flight_height:g}m_W{swath_width:g}m_{current_date}"
     else:
         filename_base = f"{field_code}_DJI_{grid_str}m_{current_date}"
 
+    # Pix4D 호환: 경계 ShapeFile에 비행고도(height)/살포폭(line_space)/이름(name) 속성 포함 (UTF-8)
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
+    boundary_geom_4326 = boundary_4326.union_all()
+    boundary_attr = gpd.GeoDataFrame(
+        {
+            'height': [float(flight_height) if flight_height > 0 else 3.0],
+            'line_space': [float(swath_width) if swath_width > 0 else 5.0],
+            'name': [f"{field_code}_변량시비맵"],
+        },
+        geometry=[boundary_geom_4326], crs="EPSG:4326"
+    )
     boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
-    boundary_4326.to_file(boundary_out, encoding='euc-kr')
+    boundary_attr.to_file(boundary_out, encoding='utf-8')
 
     rate_map = {}
     for _, row in vra_df.iterrows():
@@ -291,17 +313,21 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     out_image = rasterize(shapes=shapes, out_shape=(height, width), transform=transform, fill=0, dtype='float32')
 
     tif_out = os.path.join(rx_folder, f"{filename_base}.tif")
+    # Pix4D 호환: nodata 태그 없이 저장 (0 = 살포 제외 구역의 실제 값)
     out_meta = {
         "driver": "GTiff", "height": height, "width": width, "count": 1,
-        "dtype": 'float32', "crs": "EPSG:4326", "transform": transform, "nodata": 0
+        "dtype": 'float32', "crs": "EPSG:4326", "transform": transform, "nodata": None
     }
     with rasterio.open(tif_out, "w", **out_meta) as dest:
         dest.write(out_image, 1)
 
+    # World File 표준: 5,6번째 줄은 좌상단 픽셀의 '중심' 좌표 (모서리 + 반 픽셀)
     tfw_out = os.path.join(rx_folder, f"{filename_base}.tfw")
+    center_x = transform.c + transform.a / 2.0
+    center_y = transform.f + transform.e / 2.0
     with open(tfw_out, "w") as f:
-        for val in [transform.a, transform.b, transform.d, transform.e, transform.c, transform.f]:
-            f.write(f"{val}\n")
+        for val in [transform.a, transform.d, transform.b, transform.e, center_x, center_y]:
+            f.write(f"{val:.10f}\n")
     print(f"    - DJI Rx Map saved: {tif_out}")
 
 
@@ -482,15 +508,12 @@ def main():
         else:
             current_relax_factor = 0.7 if current_crop in ['soybean', 'wheat'] else 0.3
 
-        zip_boundary_path_1 = os.path.join(BOUNDARY_FOLDER, f"{field_code}_Boundary.zip")
-        zip_boundary_path_2 = os.path.join(BOUNDARY_FOLDER, f"{field_code}.zip")
+        zip_boundary_path = find_boundary_zip(BOUNDARY_FOLDER, field_code)
         input_shp_path = os.path.join(BOUNDARY_FOLDER, f"{field_code}.shp")
         output_shp_path = os.path.join(OUTPUT_FOLDER, "DJI", "ShapeFile", f"{field_code}.shp")
 
-        if os.path.exists(zip_boundary_path_1):
-            boundary = detector.load_boundary_from_zip(zip_boundary_path_1)
-        elif os.path.exists(zip_boundary_path_2):
-            boundary = detector.load_boundary_from_zip(zip_boundary_path_2)
+        if zip_boundary_path is not None:
+            boundary = detector.load_boundary_from_zip(zip_boundary_path)
         elif os.path.exists(input_shp_path):
             boundary = detector.load_boundary_from_shp(input_shp_path)
         elif os.path.exists(output_shp_path):

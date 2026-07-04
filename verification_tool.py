@@ -16,13 +16,13 @@ warnings.filterwarnings("ignore")
 # 1. 설정 (폴더 경로)
 # ======================================================
 # Python 코드로 생성된 Rx 폴더
-GEN_FOLDER = "result_final_dji_wgs84/DJI/Rx"
+GEN_FOLDER = "result/gj_result_0705/DJI/Rx"
 
 # Pix4D로 생성된 Rx 폴더 (사용자 환경에 맞게 수정하세요)
-PIX_FOLDER = "pix4d_data/DJI/Rx"
+PIX_FOLDER = "result/pix4d_data/02_김제/DJI/Rx"
 
 # 결과 리포트 이미지가 저장될 폴더
-REPORT_FOLDER = "verification_reports"
+REPORT_FOLDER = "verification_reports/gj_0705"
 
 
 # ======================================================

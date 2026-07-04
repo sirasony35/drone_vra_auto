@@ -1,0 +1,13 @@
+# 드론 VRA 자동화 의존성 (Python 3.12 기준, 2026-07 검증 버전)
+# 설치: pip install -r requirements.txt
+#  - GDAL 의존 패키지(geopandas/rasterio)는 conda 환경(conda-forge) 사용 권장
+geopandas==1.1.1
+rasterio==1.4.3
+shapely==2.1.1
+numpy==2.4.2
+pandas==3.0.1
+scipy==1.16.2
+scikit-image==0.26.0
+scikit-learn==1.7.2
+matplotlib==3.10.6
+flask==3.1.3
