@@ -179,7 +179,11 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **2026-07-05 웹서비스 배포 방안 검토 (진행 대기)**:
   - 무료 호스팅(Render/PythonAnywhere 등)은 부적합 판정 — 업로드 용량(GNDVI zip 0.8~2.5GB), 메모리(GDAL 처리 시 수 GB, 무료 티어는 ~512MB), 처리 시간/슬립(cold start) 한계. 농지 좌표·작황 데이터의 외부 서버 업로드는 보안 검토도 필요.
   - 검토 결과 권장안: **사내 PC 상시 실행 + Cloudflare Tunnel(무료, 외부 어디서나 HTTPS 접속)** 또는 **Tailscale(무료, 지정 팀원만 접속)**. 차선책: Oracle Cloud Always Free VM(4코어/24GB, 리눅스 관리 필요), Hugging Face Spaces(16GB RAM이나 업로드 제약·슬립). 불특정 다수 대상 서비스로 확장 시에는 유료 VPS 권장.
-  - **다음 단계(대기 중)**: 사용자가 회사 PC 사양/정책 확인 후 Tunnel(외부 공개) vs Tailscale(팀 전용) 중 택일하여 상시 서버 세팅 진행 예정 — 부팅 시 자동 시작 + `app.py`의 `host="0.0.0.0"` 변경 + 방화벽 8000 포트 허용 포함.
+  - **결정(2026-07-05): Cloudflare Tunnel 채택** — 사무실 PC 상시 실행 + 외부 접속. 구현 완료:
+    - **분할 업로드 도입**: Cloudflare 무료 플랜의 요청당 100MB 제한 대응. 브라우저 JS가 파일을 64MB 조각으로 잘라 `/chunk`(순차 append) → `/finalize`(작업 구성+실행)로 전송. 진행률 바 표시. 기존 `/upload` 일괄 방식은 제거. `MAX_CONTENT_LENGTH`는 256MB로 축소, `threaded=True`(처리 중에도 폴링 응답), `VRA_NO_BROWSER=1` env로 서버 PC에서 브라우저 자동열림 억제.
+    - **`처방맵_외부공개_실행.bat` 신규**: 웹앱(최소화 창) + cloudflared 빠른 터널 실행, trycloudflare.com 주소 발급. cloudflared.exe 없으면 자동 다운로드. `webapp/cloudflared.exe`(52MB) 다운로드해 둠.
+    - 검증: 로컬 분할 업로드 E2E(831MB/13조각) 통과, **실제 터널 경유 E2E 통과**(공개 URL로 171MB tif 업로드→처방 생성→결과 다운로드).
+    - 주의: 빠른 터널은 재시작마다 주소 변경. 주소 고정/접근 제한이 필요해지면 Cloudflare 계정+도메인으로 이름 있는 터널 + Cloudflare Access(무료 이메일 인증) 전환. 서버 host는 127.0.0.1 유지(터널이 로컬 프록시하므로 LAN 직노출 없음). 부팅 자동시작은 shell:startup에 bat 바로가기(배포안내.md 참조).
 
 - **2026-07-05 비개발자용 웹앱 추가** (`webapp/app.py`, `처방맵_웹앱_실행.bat` 신규):
   - Flask 기반 로컬 웹앱. `처방맵_웹앱_실행.bat` 더블클릭 → 브라우저 자동 오픈(127.0.0.1:8000) → ① GNDVI tif(zip) ② 바운더리 zip(선택, zip묶음/개별zip/shp 모두 허용) ③ vra.csv 업로드 → 처방맵 생성 → 결과 zip 다운로드 + Result.png 미리보기.
