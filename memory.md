@@ -176,6 +176,21 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 # 변경 이력
 
+- **2026-07-07 XAG Pix4D 호환성 수정** (`operation_main.py` > `save_xag_files_wgs84`, 기준: `pix4d_data/GJR5_XAG` 실물 산출물 대조):
+  - **KML `<Folder>` 래퍼 제거**: Pix4D는 Placemark가 `<Document>` 바로 아래에 위치 (기존 코드는 `<Folder><name>Field_Boundary</name>`로 감쌌음). XAG 앱 파서가 고정 경로로 읽을 가능성 대비 구조 일치화. Style 블록도 Pix4D와 동일한 멀티라인 들여쓰기로 변경.
+  - **KML 내부 링(구멍) 반영**: 기존엔 WKT(borderWKT)에만 interior 포함하고 KML은 exterior만 기록 → 구멍 있는 필지에서 KML/JSON 경계 불일치 가능성. `<innerBoundaryIs>` 추가로 일치화 (GJ 필지는 단일 폴리곤이라 기존 산출물엔 무영향).
+  - **dosage 정수화**: Pix4D 산출물이 정수 체계(19/18/17) → `round(x,2)` float에서 `int(round(x))`로 변경. 총량 정밀도 약간 희생(±수 kg), 실기체 float 허용 여부 미확인이라 안전측 선택.
+  - **name 통일**: KML `<name>`/JSON `name`을 `{필지코드}_XAG`로 (기존 filename_base엔 grid·날짜 붙어 있었음, Pix4D는 'GJR5_XAG' 패턴). 출력 파일명은 기존 `{필지}_XAG_{grid}m_{날짜}` 유지.
+  - 검증: 합성 데이터로 생성 후 Pix4D 원본과 프로그램 대조 — KML 요소 트리(경로 순서 포함)·태그 속성 완전 일치, JSON 17개 키 순서·값 타입 완전 일치, weightData 길이=rows×columns, dosage 정수 확인. DJI 호환성 수정(7/4)과 함께 양 기체 모두 Pix4D 구조 일치 완료.
+
+- **2026-07-07 webapp/app.py 재작성 (회사 PC)**:
+  - 7/5 웹앱은 집 PC에서 작성 후 **git에 커밋되지 않아** 회사 PC에 `webapp/` 폴더가 없었음 (bat·배포안내.md·memory.md만 커밋됨). memory.md 기록 스펙 그대로 회사 PC에서 재구현.
+  - 구현 내용: 분할 업로드(`/chunk` 64MB 순차 append → `/finalize` 작업 구성+백그라운드 실행), 1.5초 `/status` 폴링(로그 실시간), `/download`(결과 zip)·`/preview`(Result.png), 동시 실행 방지 락, `MAX_CONTENT_LENGTH=256MB`, `threaded=True`, `VRA_NO_BROWSER=1` 지원, 포트 8000. 바운더리 업로드는 zip묶음/개별 zip/shp 세트 3경로 모두 지원하며 **zip 핸들을 닫은 뒤 os.replace** (7/5 발견 버그 재발 방지). 업로드 처리 전체 try/except → JSON 오류 응답, JS는 비JSON 응답 시 HTTP 상태 안내 + 폴링 4회 연속 실패 시 연결 끊김 안내.
+  - matplotlib `Agg` 백엔드 강제(백그라운드 스레드에서 PNG 저장), `operation_main`을 import해 경로 상수만 작업 폴더(`webapp/jobs/<타임스탬프>/`)로 패치 후 `om.main()` 실행 — 기존 파이프라인 그대로 재사용.
+  - E2E 검증 통과 (합성 GNDVI + 경계 zip + vra.csv): ① DJI 경로 — 다중 조각(6조각) 업로드→Rx tif/tfw+ShapeFile+VRA csv+Result png 생성→zip 다운로드→미리보기, ② XAG 경로 — zip묶음 바운더리→5m 격자 강제→KML+Prescription JSON 생성. 동시 실행 락 동작 확인.
+  - **`.gitignore` 신규 추가** (webapp/jobs/, cloudflared.exe, data/, result/ 등) — webapp 미커밋 사고 재발 방지 목적. **webapp/app.py를 git에 커밋해 양쪽 PC 동기화 필요.**
+  - 회사 PC python312 env에 flask 3.1.3 pip 설치함 (GIS 스택은 기존재).
+
 - **2026-07-05 웹서비스 배포 방안 검토 (진행 대기)**:
   - 무료 호스팅(Render/PythonAnywhere 등)은 부적합 판정 — 업로드 용량(GNDVI zip 0.8~2.5GB), 메모리(GDAL 처리 시 수 GB, 무료 티어는 ~512MB), 처리 시간/슬립(cold start) 한계. 농지 좌표·작황 데이터의 외부 서버 업로드는 보안 검토도 필요.
   - 검토 결과 권장안: **사내 PC 상시 실행 + Cloudflare Tunnel(무료, 외부 어디서나 HTTPS 접속)** 또는 **Tailscale(무료, 지정 팀원만 접속)**. 차선책: Oracle Cloud Always Free VM(4코어/24GB, 리눅스 관리 필요), Hugging Face Spaces(16GB RAM이나 업로드 제약·슬립). 불특정 다수 대상 서비스로 확장 시에는 유료 VPS 권장.
