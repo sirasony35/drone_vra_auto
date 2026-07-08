@@ -357,20 +357,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
         wkt_str += f",({format_coords_wkt(interior.coords)})"
     wkt_str += ")"
 
-    # 내부 링(구멍)도 KML에 반영 — WKT(borderWKT)와 경계 일치 보장
-    inner_rings = ""
-    for interior in geom.interiors:
-        inner_coords = " ".join([f"{lon:.8f},{lat:.8f}" for lon, lat in interior.coords])
-        inner_rings += f"""
-    <innerBoundaryIs>
-     <LinearRing>
-      <coordinates>{inner_coords}</coordinates>
-     </LinearRing>
-    </innerBoundaryIs>"""
-
-    display_name = f"{field_code}_XAG"
-
-    # 2. XAG KML 생성 (Pix4D 구조 일치: Folder 래퍼 없이 Document 바로 아래 Placemark)
+    # 2. XAG KML 생성
     kml_content = f"""<?xml version='1.0' encoding='utf-8'?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
  <Document id="root_doc">
@@ -378,31 +365,30 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
    <SimpleField name="type" type="string"/>
    <SimpleField name="visualType" type="string"/>
   </Schema>
-  <Placemark id="layer.1">
-   <name>{display_name}</name>
-   <description>Boundaries</description>
-   <Style>
-    <LineStyle>
-     <color>ff0000ff</color>
-    </LineStyle>
-    <PolyStyle>
-     <fill>0</fill>
-    </PolyStyle>
-   </Style>
-   <ExtendedData>
-    <SchemaData schemaUrl="#layer">
-     <SimpleData name="type">boundary</SimpleData>
-     <SimpleData name="visualType">BOUNDARY</SimpleData>
-    </SchemaData>
-   </ExtendedData>
-   <Polygon>
-    <outerBoundaryIs>
-     <LinearRing>
-      <coordinates>{kml_coords}</coordinates>
-     </LinearRing>
-    </outerBoundaryIs>{inner_rings}
-   </Polygon>
-  </Placemark>
+  <Folder>
+   <name>Field_Boundary</name>
+   <Placemark id="layer.1">
+    <name>{filename_base}</name>
+    <description>Boundaries</description>
+    <Style>
+     <LineStyle><color>ff0000ff</color></LineStyle>
+     <PolyStyle><fill>0</fill></PolyStyle>
+    </Style>
+    <ExtendedData>
+     <SchemaData schemaUrl="#layer">
+      <SimpleData name="type">boundary</SimpleData>
+      <SimpleData name="visualType">BOUNDARY</SimpleData>
+     </SchemaData>
+    </ExtendedData>
+    <Polygon>
+     <outerBoundaryIs>
+      <LinearRing>
+       <coordinates>{kml_coords}</coordinates>
+      </LinearRing>
+     </outerBoundaryIs>
+    </Polygon>
+   </Placemark>
+  </Folder>
  </Document>
 </kml>"""
     kml_out = os.path.join(xag_folder, f"{filename_base}_Boundary.kml")
@@ -438,9 +424,8 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
             rate_val = float(row['Rate(kg/ha)'])
             if zone_idx in [1, 2, 3]:
                 # XAG의 dosage 단위(g/m²)에 맞게 kg/ha 값을 10으로 나눔
-                # Pix4D 호환: dosage는 정수로 저장 (Pix4D 산출물이 정수 체계)
-                dosage_g_m2 = int(round(rate_val / 10.0))
-                data_type_level.append({"dosage": dosage_g_m2, "level": zone_idx})
+                dosage_g_m2 = rate_val / 10.0
+                data_type_level.append({"dosage": round(dosage_g_m2, 2), "level": zone_idx})
         except:
             continue
 
@@ -454,7 +439,7 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
         "dataType": 3,
         "dataTypeLevel": data_type_level,
         "guid": str(uuid.uuid4()),
-        "name": display_name,
+        "name": filename_base,
         "originEndLat": float(f"{maxy:.14f}"),
         "originEndLng": float(f"{exact_maxx:.14f}"),
         "originLat": float(f"{exact_miny:.14f}"),

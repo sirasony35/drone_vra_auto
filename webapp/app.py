@@ -25,13 +25,39 @@ import webbrowser
 import matplotlib
 matplotlib.use("Agg")  # 백그라운드 스레드에서 그림 저장 (GUI 백엔드 금지)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))          # .../drone_vra_auto/webapp
-ROOT_DIR = os.path.dirname(BASE_DIR)                           # .../drone_vra_auto
+# cp949 콘솔에서 한글/특수문자 출력 시 크래시 방지
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
+
+def _writable_base():
+    """작업(jobs) 폴더의 베이스 — exe 폴더가 쓰기 불가면 LOCALAPPDATA 사용."""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        try:
+            probe = os.path.join(exe_dir, ".write_test")
+            with open(probe, "w") as f:
+                f.write("x")
+            os.remove(probe)
+            return exe_dir
+        except OSError:
+            base = os.path.join(os.environ.get("LOCALAPPDATA", exe_dir), "VRA_Webapp")
+            os.makedirs(base, exist_ok=True)
+            return base
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = _writable_base()                                    # 개발: .../drone_vra_auto/webapp
 JOBS_DIR = os.path.join(BASE_DIR, "jobs")
 UPLOAD_DIR = os.path.join(JOBS_DIR, "_uploads")
 
-sys.path.insert(0, ROOT_DIR)
-import operation_main as om  # noqa: E402  (검증된 파이프라인 그대로 재사용)
+if not getattr(sys, "frozen", False):
+    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, ROOT_DIR)
+import operation_main as om  # noqa: E402  (검증된 파이프라인 그대로 재사용, exe에는 번들됨)
 
 from flask import Flask, request, jsonify, send_file, abort  # noqa: E402
 

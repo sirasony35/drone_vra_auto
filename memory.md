@@ -176,6 +176,15 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 # 변경 이력
 
+<<<<<<< HEAD
+- **2026-07-08 웹앱 .exe 패키징 (PyInstaller)** — 로컬 서버 불안정 대응, PC별 독립 설치형:
+  - `빌드_exe.bat` 신규: PyInstaller onedir 빌드 → `dist\VRA_Webapp\VRA_Webapp.exe` (426MB, zip 170MB). conda/파이썬 설치 없이 폴더 복사+더블클릭으로 각 PC에서 localhost 서버 독립 실행.
+  - `webapp/app.py` frozen 지원 추가: `sys.frozen`이면 BASE_DIR=exe 폴더(쓰기 불가 시 `%LOCALAPPDATA%\VRA_Webapp` 폴백), jobs 폴더 exe 옆 생성. cp949 콘솔 크래시 방지 `reconfigure(errors="replace")`.
+  - **빌드 함정 2개 (재빌드 시 필수)**: ① `rasterio.sample` 등 동적 모듈 → `--collect-submodules rasterio --collect-data rasterio --collect-submodules pyogrio --collect-data pyogrio --collect-data pyproj` 필요 (없으면 exe 시작 크래시). ② python312 env의 torch+CUDA(SAM용)가 통째로 끌려와 4GB → `--exclude-module torch/torchvision/cv2` 등으로 426MB. 플래그는 빌드_exe.bat에 고정됨.
+  - **코드 수정 시 exe 재빌드 필수** (py가 exe에 번들). 검증: exe 기동→리스너 확인→DJI/XAG E2E 통과. `.gitignore`에 dist/·build/·*.spec 추가. 배포안내.md에 '방법 A. exe 배포' 절 추가.
+  - 테스트 중 발견: 포트 8000에 이전 dev 서버가 살아있으면 exe가 안 떠도 HTTP 200이 나옴 — exe 검증 시 반드시 리스너 프로세스 확인(`Get-NetTCPConnection`).
+  - vra_setting/gj_webapp_vra.csv 신규 (GJR1~8, DJI, 웹앱 업로드용). GJR5 실데이터(160MB) 웹앱 E2E 통과: 총량 60.00kg 정확, 처리 6초.
+
 - **2026-07-07 XAG Pix4D 호환성 수정** (`operation_main.py` > `save_xag_files_wgs84`, 기준: `pix4d_data/GJR5_XAG` 실물 산출물 대조):
   - **KML `<Folder>` 래퍼 제거**: Pix4D는 Placemark가 `<Document>` 바로 아래에 위치 (기존 코드는 `<Folder><name>Field_Boundary</name>`로 감쌌음). XAG 앱 파서가 고정 경로로 읽을 가능성 대비 구조 일치화. Style 블록도 Pix4D와 동일한 멀티라인 들여쓰기로 변경.
   - **KML 내부 링(구멍) 반영**: 기존엔 WKT(borderWKT)에만 interior 포함하고 KML은 exterior만 기록 → 구멍 있는 필지에서 KML/JSON 경계 불일치 가능성. `<innerBoundaryIs>` 추가로 일치화 (GJ 필지는 단일 폴리곤이라 기존 산출물엔 무영향).
@@ -191,6 +200,8 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
   - **`.gitignore` 신규 추가** (webapp/jobs/, cloudflared.exe, data/, result/ 등) — webapp 미커밋 사고 재발 방지 목적. **webapp/app.py를 git에 커밋해 양쪽 PC 동기화 필요.**
   - 회사 PC python312 env에 flask 3.1.3 pip 설치함 (GIS 스택은 기존재).
 
+=======
+>>>>>>> parent of 8ad59b2 (수정사항)
 - **2026-07-05 웹서비스 배포 방안 검토 (진행 대기)**:
   - 무료 호스팅(Render/PythonAnywhere 등)은 부적합 판정 — 업로드 용량(GNDVI zip 0.8~2.5GB), 메모리(GDAL 처리 시 수 GB, 무료 티어는 ~512MB), 처리 시간/슬립(cold start) 한계. 농지 좌표·작황 데이터의 외부 서버 업로드는 보안 검토도 필요.
   - 검토 결과 권장안: **사내 PC 상시 실행 + Cloudflare Tunnel(무료, 외부 어디서나 HTTPS 접속)** 또는 **Tailscale(무료, 지정 팀원만 접속)**. 차선책: Oracle Cloud Always Free VM(4코어/24GB, 리눅스 관리 필요), Hugging Face Spaces(16GB RAM이나 업로드 제약·슬립). 불특정 다수 대상 서비스로 확장 시에는 유료 VPS 권장.
