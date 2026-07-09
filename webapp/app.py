@@ -268,7 +268,8 @@ def finalize():
 
             shutil.rmtree(upload_root, ignore_errors=True)
 
-            gndvi_files = glob.glob(os.path.join(data_dir, "*_GNDVI.tif"))
+            # operation_main과 동일하게 '*_GNDVI.tif' / '*_GNDVI.data.tif' 등 변형 허용
+            gndvi_files = sorted(set(glob.glob(os.path.join(data_dir, "*_GNDVI*.tif"))))
             if not gndvi_files:
                 raise ValueError("'*_GNDVI.tif' 형식의 GNDVI 영상이 없습니다. "
                                  "파일명이 '필지코드_..._GNDVI.tif' 인지 확인하세요.")

@@ -32,15 +32,20 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/gj_data"
+DATA_FOLDER = "data/sc_data/25_0721"
 BOUNDARY_FOLDER = "data/gj_boundary"
-OUTPUT_FOLDER = "result/gj_result_0705"
-VRA_CSV_PATH = "vra_setting/gj_vra.csv"
+OUTPUT_FOLDER = "result/sc_result_0709"
+VRA_CSV_PATH = "vra_setting/sc_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
 VALID_THRESHOLD = -999.0
 MAX_MASK_THRESHOLD = 0.40
+
+# 경계 파일이 없을 때 자동 감지 방식:
+#   'footprint' - 유효 데이터(non-nodata) 외곽선 (드론 정사영상이 필지대로 잘린 경우 권장)
+#   'otsu'      - GNDVI 식생 임계값 기반 (사각형 영상에 주변 논/도로가 포함된 경우)
+BOUNDARY_METHOD = 'footprint'
 
 
 # ======================================================
@@ -124,9 +129,15 @@ def clip_raster_to_boundary(raster_path, boundary_gdf):
 def calculate_grid_mean_stats(grid_gdf, mem_raster, col_name='Raw_Value'):
     stats = []
     with mem_raster.open() as src:
-        for _, row in grid_gdf.iterrows():
+        # 격자는 분석 CRS(5179)로 생성되지만 클립 래스터는 원본 CRS를 유지할 수 있다
+        # (예: EPSG:4326 드론 영상). 샘플링 시 격자를 래스터 CRS로 맞춰야 값이 잡힌다.
+        if grid_gdf.crs is not None and src.crs is not None and grid_gdf.crs != src.crs:
+            sample_geoms = grid_gdf.to_crs(src.crs).geometry.tolist()
+        else:
+            sample_geoms = grid_gdf.geometry.tolist()
+        for geom in sample_geoms:
             try:
-                out_image, _ = mask(src, [row['geometry']], crop=True)
+                out_image, _ = mask(src, [geom], crop=True)
                 data = out_image[0]
                 valid_data = data[(~np.isnan(data)) & (data > VALID_THRESHOLD) & (data != 0)]
                 if valid_data.size > 0:
@@ -471,7 +482,8 @@ def main():
 
     detector = BoundaryDetector()
     vra_calc = VRACalculator(VRA_CSV_PATH)
-    tif_files = glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI.tif"))
+    # '*_GNDVI.tif' 및 '*_GNDVI.data.tif' 등 접미사 변형을 모두 허용 (필지코드는 첫 토큰 유지)
+    tif_files = sorted(set(glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI*.tif"))))
 
     for tif_path in tif_files:
         filename = os.path.basename(tif_path)
@@ -518,6 +530,8 @@ def main():
             boundary = detector.load_boundary_from_shp(input_shp_path)
         elif os.path.exists(output_shp_path):
             boundary = detector.load_boundary_from_shp(output_shp_path)
+        elif BOUNDARY_METHOD == 'footprint':
+            boundary = detector.detect_boundary_footprint(tif_path)
         else:
             boundary = detector.detect_boundary_otsu(tif_path, crop_type=current_crop)
 

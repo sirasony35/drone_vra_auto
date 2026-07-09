@@ -176,7 +176,13 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 # 변경 이력
 
-<<<<<<< HEAD
+- **2026-07-09 Footprint 경계 방식 추가 + CRS/glob 버그 2건 수정** (SC 김제 필지, 경계 파일 없음):
+  - **glob 패턴 확장**: `main()`의 `*_GNDVI.tif` → `*_GNDVI*.tif`(sorted+set). SC 파일명이 `SC03_GNDVI.data.tif`(중간 `.data`)라 기존 패턴에 하나도 안 잡혀 루프가 빈 채로 조용히 종료되던 문제. 필지코드는 여전히 첫 토큰.
+  - **CRS 불일치 버그 수정**(`calculate_grid_mean_stats`): SC GNDVI가 **EPSG:4326**인데 `clip_raster_to_boundary`는 래스터를 원본 CRS 유지, 격자는 5179 생성 → 4326 래스터를 5179 격자로 샘플링해 **전 셀 NaN → 조용히 continue(산출물 0개)**. 샘플링 시 `grid_gdf.to_crs(src.crs)`로 해결. 평균값은 CRS 무관, 면적은 5179로 정확. GJR(5179 영상)은 우연히 CRS가 맞아 동작했던 것 — **4326 드론 영상은 이 수정 없이는 처방 안 나옴**.
+  - **`detect_boundary_footprint()` 신규**(`boundary_detector.py`): 유효 데이터(non-NaN/nodata) 외곽선을 경계로. 드론 정사영상이 필지대로 잘려(바깥 NaN) 나온 경우 Otsu보다 확실. fill_holes+closing+opening+최대연결영역+simplify. `operation_main.py`에 `BOUNDARY_METHOD='footprint'|'otsu'` 상수(기본 footprint), 경계 파일 없을 때 fallback. Otsu는 사각형 영상에 주변 논/도로 포함 시만.
+  - **footprint > Otsu 근거**: Otsu는 GNDVI 임계 식생판정 → 가장자리 벼줄·낮은GNDVI 모서리 잘림(SC 실측 필지면적 91~96%로 축소, 톱니 경계). footprint는 외곽 100% 추적, 임계 불필요, 작물/시기 무관. RGB 불필요(같은 비행 RGB는 footprint 동일).
+  - 검증: SC03~SC14 10필지 전량 성공. 총량 60.00±0.01kg, 면적 0.236~0.533ha, Rx(EPSG:4326,nodata=None)·경계 SHP 정상. 몽타주로 10필지 경계가 실제 외곽 정확 일치(불규칙 SC14·곡선 SC11 포함). 경로: DATA=data/sc_data/25_0721, OUTPUT=result/sc_result_0709, VRA=vra_setting/sc_vra.csv.
+
 - **2026-07-08 웹앱 .exe 패키징 (PyInstaller)** — 로컬 서버 불안정 대응, PC별 독립 설치형:
   - `빌드_exe.bat` 신규: PyInstaller onedir 빌드 → `dist\VRA_Webapp\VRA_Webapp.exe` (426MB, zip 170MB). conda/파이썬 설치 없이 폴더 복사+더블클릭으로 각 PC에서 localhost 서버 독립 실행.
   - `webapp/app.py` frozen 지원 추가: `sys.frozen`이면 BASE_DIR=exe 폴더(쓰기 불가 시 `%LOCALAPPDATA%\VRA_Webapp` 폴백), jobs 폴더 exe 옆 생성. cp949 콘솔 크래시 방지 `reconfigure(errors="replace")`.
@@ -200,8 +206,6 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
   - **`.gitignore` 신규 추가** (webapp/jobs/, cloudflared.exe, data/, result/ 등) — webapp 미커밋 사고 재발 방지 목적. **webapp/app.py를 git에 커밋해 양쪽 PC 동기화 필요.**
   - 회사 PC python312 env에 flask 3.1.3 pip 설치함 (GIS 스택은 기존재).
 
-=======
->>>>>>> parent of 8ad59b2 (수정사항)
 - **2026-07-05 웹서비스 배포 방안 검토 (진행 대기)**:
   - 무료 호스팅(Render/PythonAnywhere 등)은 부적합 판정 — 업로드 용량(GNDVI zip 0.8~2.5GB), 메모리(GDAL 처리 시 수 GB, 무료 티어는 ~512MB), 처리 시간/슬립(cold start) 한계. 농지 좌표·작황 데이터의 외부 서버 업로드는 보안 검토도 필요.
   - 검토 결과 권장안: **사내 PC 상시 실행 + Cloudflare Tunnel(무료, 외부 어디서나 HTTPS 접속)** 또는 **Tailscale(무료, 지정 팀원만 접속)**. 차선책: Oracle Cloud Always Free VM(4코어/24GB, 리눅스 관리 필요), Hugging Face Spaces(16GB RAM이나 업로드 제약·슬립). 불특정 다수 대상 서비스로 확장 시에는 유료 VPS 권장.
