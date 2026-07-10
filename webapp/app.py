@@ -192,6 +192,28 @@ def _run_job(job_id, job_dir):
             raise RuntimeError("결과 파일이 생성되지 않았습니다. 로그의 경고/오류를 확인하세요 "
                                "(필지코드-CSV field 불일치가 가장 흔한 원인).")
 
+        # 실제 기체 처방 데이터(DJI Rx GeoTIFF / XAG JSON)가 만들어졌는지 확인.
+        # vra.csv의 field 코드가 영상 필지코드와 안 맞으면 Result.png만 생성되므로,
+        # 처방 데이터가 하나도 없으면 '성공'으로 넘기지 않고 명확히 실패 처리한다.
+        rx_files = glob.glob(os.path.join(om.OUTPUT_FOLDER, "DJI", "Rx", "*.tif"))
+        xag_files = glob.glob(os.path.join(om.OUTPUT_FOLDER, "XAG", "*_Prescription.json"))
+        n_rx = len(rx_files) + len(xag_files)
+        # 필지코드별 처방 성공/실패 집계 (Result.png는 있으나 처방 없는 필지 = 실패)
+        made_codes = {os.path.basename(p).split("_")[0] for p in rx_files + xag_files}
+        png_codes = {os.path.basename(p).split("_")[0] for p in
+                     glob.glob(os.path.join(om.OUTPUT_FOLDER, "*_Result.png"))}
+        failed_codes = sorted(png_codes - made_codes)
+
+        if n_rx == 0:
+            raise RuntimeError(
+                "처방 데이터(DJI Rx / XAG JSON)가 생성되지 않았습니다 — 지도 이미지(PNG)만 만들어졌습니다.\n"
+                "가장 흔한 원인: vra.csv의 'field' 값이 영상 파일명 앞 필지코드와 다릅니다.\n"
+                f"영상 필지코드: {sorted(png_codes)} / vra.csv에 이 코드들이 있는지 확인하세요."
+            )
+        if failed_codes:
+            print(f"[주의] 다음 필지는 처방 없이 지도만 생성됨(vra.csv field 불일치 추정): {failed_codes}")
+
+        print(f"[요약] 처방 생성 {len(made_codes)}필지, 실패 {len(failed_codes)}필지")
         print("[압축] 결과 zip 생성 중...")
         zip_base = os.path.join(job_dir, f"VRA_result_{job_id}")
         zip_path = shutil.make_archive(zip_base, "zip", om.OUTPUT_FOLDER)
@@ -498,7 +520,13 @@ async function poll(jobId) {
 
     if (data.state === 'done') {
       clearInterval(polling);
-      setMsg('✅ 처방맵 생성 완료!', 'ok');
+      // 일부 필지가 처방 없이 지도만 생성됐는지(vra.csv field 불일치) 확인해 경고
+      const warnLine = data.log.find(l => l.includes('[주의]'));
+      if (warnLine) {
+        setMsg('⚠️ 처방맵 생성 완료 (일부 필지 실패). ' + warnLine.replace(/^\\s*\\[주의\\]\\s*/, ''), 'err');
+      } else {
+        setMsg('✅ 처방맵 생성 완료!', 'ok');
+      }
       document.getElementById('btn').disabled = false;
       document.getElementById('dl').href = '/download/' + jobId;
       const pv = document.getElementById('previews');
@@ -511,7 +539,11 @@ async function poll(jobId) {
       document.getElementById('result').style.display = 'block';
     } else if (data.state === 'error') {
       clearInterval(polling);
-      setMsg('처리 중 오류가 발생했습니다. 아래 로그를 확인하세요.', 'err');
+      // 로그에서 실제 오류 원인([오류] 줄)을 찾아 화면에 그대로 표시
+      const errLine = [...data.log].reverse().find(l => l.includes('[오류]'));
+      const reason = errLine ? errLine.replace(/^\\s*\\[오류\\]\\s*/, '') : '처리 중 오류가 발생했습니다. 아래 로그를 확인하세요.';
+      setMsg('❌ ' + reason, 'err');
+      document.getElementById('log').style.display = 'block';
       document.getElementById('btn').disabled = false;
     }
   } catch (e) {

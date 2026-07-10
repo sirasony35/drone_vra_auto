@@ -176,6 +176,15 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 # 변경 이력
 
+- **2026-07-10 웹앱 'PNG만 생성' UX 결함 수정 + exe 재빌드**:
+  - **증상**: 사용자가 처방맵 zip을 받았는데 Result.png만 있고 DJI Rx/ShapeFile·XAG JSON(기체 로드용 데이터)이 없음.
+  - **원인**: main()에서 `save_map_image`(PNG)는 `if vra_df is not None` 바깥이라 **항상** 저장되지만, DJI/XAG 파일과 VRA.csv는 처방 계산 성공(`vra_df is not None`) 시에만 저장. **vra.csv의 field 코드가 영상 파일명 첫 토큰(필지코드)과 불일치**하면 `calculate_prescription`이 None 반환 → PNG만 남음. 웹앱은 이걸 '성공'으로 처리해 png뿐인 zip을 내려줌(로그의 `[Warning] 'XXX'에 대한 VRA 설정값을 찾을 수 없습니다`를 사용자가 안 봄).
+  - **수정**(`webapp/app.py` `_run_job`): om.main() 후 DJI Rx `*.tif` + XAG `*_Prescription.json` 개수 확인. **0개면 state=error로 실패 처리** + "vra.csv field가 영상 필지코드와 다릅니다, 영상 필지코드는 [...]" 안내. 일부 필지만 실패하면 로그에 실패 필지코드 나열 + "처방 N필지/실패 M필지" 요약. → png-only zip이 '성공'으로 나가지 않음.
+  - **vra.csv 없을 때(Q)**: 웹앱은 finalize에서 `VRA 설정 CSV가 업로드되지 않았습니다` 오류(HTTP 400)로 이미 차단(정상). 단 CLI(operation_main 직접)는 csv 없으면 전 필지 png-only 됨 — 위 수정은 웹앱 한정.
+  - **참고(정상 동작)**: DJI 산출물은 zip 안 `DJI/Rx/`(tif,tfw) + `DJI/ShapeFile/`(shp 세트) **하위 폴더**에 위치(Pix4D 호환 구조). 최상위엔 Result.png·VRA.csv만 보임 → 사용자가 하위 폴더 못 보고 'png만'으로 오해 가능. XAG는 `XAG/`(json,kml).
+  - exe 재빌드 → `dist\VRA_Webapp_20260710.zip`(170MB). 불일치→오류 / 일치→DJI 전체 생성 두 시나리오 exe에서 검증 통과.
+  - **프론트(JS) 오류 표시 강화**: 기존엔 error 시 "처리 중 오류가 발생했습니다. 로그를 확인하세요"만 떠서 사용자가 원인을 못 봄. 이제 로그에서 `[오류]` 줄을 추출해 화면 메시지에 직접 표시(❌ + 실제 원인), 일부 필지만 실패 시 done이어도 `[주의]` 줄을 노란 경고로 표시. Python PAGE 문자열 내 정규식은 `\\s`/`\\[`로 써야 JS에서 `\s`/`\[`로 렌더됨(확인). **사용자가 '불일치인데 오류 안 뜬다'고 한 건 수정 이전 exe 사용이 원인 — 0710 exe 배포 필요.**
+
 - **2026-07-09 Footprint 경계 방식 추가 + CRS/glob 버그 2건 수정** (SC 김제 필지, 경계 파일 없음):
   - **glob 패턴 확장**: `main()`의 `*_GNDVI.tif` → `*_GNDVI*.tif`(sorted+set). SC 파일명이 `SC03_GNDVI.data.tif`(중간 `.data`)라 기존 패턴에 하나도 안 잡혀 루프가 빈 채로 조용히 종료되던 문제. 필지코드는 여전히 첫 토큰.
   - **CRS 불일치 버그 수정**(`calculate_grid_mean_stats`): SC GNDVI가 **EPSG:4326**인데 `clip_raster_to_boundary`는 래스터를 원본 CRS 유지, 격자는 5179 생성 → 4326 래스터를 5179 격자로 샘플링해 **전 셀 NaN → 조용히 continue(산출물 0개)**. 샘플링 시 `grid_gdf.to_crs(src.crs)`로 해결. 평균값은 CRS 무관, 면적은 5179로 정확. GJR(5179 영상)은 우연히 CRS가 맞아 동작했던 것 — **4326 드론 영상은 이 수정 없이는 처방 안 나옴**.
