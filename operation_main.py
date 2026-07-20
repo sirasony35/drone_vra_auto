@@ -50,10 +50,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/jc_data"
-BOUNDARY_FOLDER = "data/gj_boundary"
-OUTPUT_FOLDER = "result/jc_result_0709"
-VRA_CSV_PATH = "vra_setting/jc_vra.csv"
+DATA_FOLDER = "data/hs_data"
+BOUNDARY_FOLDER = "data/hs_boundary"
+OUTPUT_FOLDER = "result/hs_0720"
+VRA_CSV_PATH = "vra_setting/hs_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -489,6 +489,40 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     print(f"    - XAG JSON saved: {json_out}")
 
 
+PYEONG_M2 = 3.3057851   # 1평 = 400/121 m²
+BAG_KG = 20.0           # 비료 1포대 = 20kg
+
+
+def _calc_mode_label(field_info):
+    """이 필지가 면적비율 모드인지 절대량 모드인지 라벨 반환."""
+    if field_info is None:
+        return "절대량"
+    try:
+        rk = field_info['rate_kg'] if 'rate_kg' in field_info.index else None
+        ra = field_info['rate_area'] if 'rate_area' in field_info.index else None
+        if rk is not None and ra is not None and not pd.isna(rk) and not pd.isna(ra):
+            return "면적비율"
+    except Exception:
+        pass
+    return "절대량"
+
+
+def save_run_summary(rows, output_folder):
+    """실행한 전체 필지의 처방 결과를 한 파일(엑셀)로 저장.
+    xlsx 우선, 실패 시 CSV(utf-8-sig, 엑셀에서 한글 정상)로 대체."""
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    xlsx_path = os.path.join(output_folder, "처방요약.xlsx")
+    try:
+        df.to_excel(xlsx_path, index=False, sheet_name="처방요약")
+        print(f"\n[요약] 전체 처방 요약 저장: {xlsx_path}")
+    except Exception as e:
+        csv_path = os.path.join(output_folder, "처방요약.csv")
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        print(f"\n[요약] xlsx 저장 실패({e}) → CSV로 저장: {csv_path}")
+
+
 # ======================================================
 # 3. 메인 프로세스
 # ======================================================
@@ -502,6 +536,8 @@ def main():
     vra_calc = VRACalculator(VRA_CSV_PATH)
     # '*_GNDVI.tif' 및 '*_GNDVI.data.tif' 등 접미사 변형을 모두 허용 (필지코드는 첫 토큰 유지)
     tif_files = sorted(set(glob.glob(os.path.join(DATA_FOLDER, "*_GNDVI*.tif"))))
+
+    summary_rows = []   # 전체 필지 처방 요약(엑셀 출력용)
 
     for tif_path in tif_files:
         filename = os.path.basename(tif_path)
@@ -621,7 +657,13 @@ def main():
                     })
 
             print("  - Calculating VRA Prescription...")
-            vra_df = vra_calc.calculate_prescription(field_code, zone_stats)
+            # 실측 필지 전체 면적(m², 경계 기준) — 비율 모드(rate_kg/rate_area)의 자동 면적에 사용.
+            # boundary는 이미 EPSG:5179(미터)로 변환된 상태.
+            try:
+                field_area_m2 = float(boundary.geometry.area.sum())
+            except Exception:
+                field_area_m2 = None
+            vra_df = vra_calc.calculate_prescription(field_code, zone_stats, field_area_m2=field_area_m2)
 
             f_height = float(field_info.get('height', 0)) if field_info is not None else 0
             f_width = float(field_info.get('width', 0)) if field_info is not None else 0
@@ -636,6 +678,25 @@ def main():
                 vra_out_name = f"{field_code}_{drone_type}_VRA.csv"
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
 
+                # 전체 요약(엑셀)용 1행 집계
+                total_kg = float(vra_df['Total(kg)'].sum())
+                spray_ha = float(vra_df['Area(ha)'].sum())
+                spray_py = spray_ha * 10000.0 / PYEONG_M2
+                field_py = (field_area_m2 / PYEONG_M2) if field_area_m2 else None
+                avg_rate = (total_kg / spray_ha) if spray_ha > 0 else 0.0
+                summary_rows.append({
+                    "필지": field_code,
+                    "기체": drone_type,
+                    "계산방식": _calc_mode_label(field_info),
+                    "총비료량(kg)": round(total_kg, 2),
+                    "포대수(20kg)": round(total_kg / BAG_KG, 2),
+                    "필요포대수(올림)": int(math.ceil(total_kg / BAG_KG)),
+                    "필지면적(평)": round(field_py, 1) if field_py else "",
+                    "살포면적(평)": round(spray_py, 1),
+                    "살포면적(ha)": round(spray_ha, 4),
+                    "평균살포량(kg/ha)": round(avg_rate, 1),
+                })
+
             out_img_name = f"{field_code}_{drone_type}_Result.png"
             save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name), f"Result: {field_code} ({drone_type})",
                            zone_col='Zone', boundary_gdf=boundary, max_zone=current_n_zones)
@@ -647,6 +708,9 @@ def main():
             print(f"  - Error processing {filename}: {e}")
             import traceback
             traceback.print_exc()
+
+    # 전체 실행 결과 요약(엑셀) 저장
+    save_run_summary(summary_rows, OUTPUT_FOLDER)
 
 
 if __name__ == "__main__":

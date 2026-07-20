@@ -167,6 +167,12 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **필지코드 규칙**: 모든 매칭이 파일명 맨 앞 토큰(`_` 또는 `.` 앞)을 필지코드로 사용한다. 입력 영상·경계 파일·CSV의 `field` 값·출력 파일명이 같은 코드로 일치해야 한다 (예: `SM01`, `GJR1`, `BD01`).
 - **기체별 동작 차이**: CSV의 `drone_type` 열로 DJI/XAG를 구분한다. 열이 없으면 DJI(기본). XAG는 3등급·격자 5m 강제 고정·JSON/KML 출력, DJI는 5등급·CSV 격자값·GeoTIFF/ShapeFile 출력.
 - **VRA 설정 CSV 컬럼**: `field, total, spread, crop, grid_size, sigma, masking`이 기본이며, 코드는 추가로 `drone_type, height, width`도 참조한다(`vra_calculator.py`, `operation_main.py`). 2026-07-05부터 `vra.csv`/`gj_vra.csv`는 10컬럼(`height,width,drone_type` 포함) 체계 — `drone_type`은 DJI/XAG 분기(미기재 시 DJI), `height`/`width`는 비행고도/살포폭으로 경계 shp DBF와 파일명에 반영. `sm_vra.csv`/`bd_vra.csv`는 아직 기본 7컬럼. `sigma`가 비어 있으면 자동 계산, `masking`은 나지 마스킹 강도(relax_factor)로 쓰인다.
+- **전체 처방 요약 엑셀 출력 (2026-07-20 추가, `operation_main.save_run_summary`)**: 한 번 실행한 전체 필지를 한 파일로. OUTPUT_FOLDER 최상위에 `처방요약.xlsx`(openpyxl, 실패 시 `처방요약.csv` utf-8-sig 폴백). 컬럼: 필지, 기체, 계산방식(면적비율/절대량), 총비료량(kg), 포대수(20kg), 필요포대수(올림), 필지면적(평), 살포면적(평), 살포면적(ha), 평균살포량(kg/ha). 1포대=20kg 상수(`BAG_KG`), 1평=3.3057851㎡(`PYEONG_M2`). main() 루프에서 필지별 1행 집계 후 루프 종료 시 저장. 웹앱 zip에 자동 포함. **exe 빌드에 `--collect-submodules openpyxl` 추가 필수**(없으면 xlsx 실패→csv 폴백). exe E2E 검증 통과.
+- **비료량 입력 방식 2종 (2026-07-20 추가, `vra_calculator._resolve_total_kg`)**: 농가별 비료 기준 대응.
+  - **절대량 모드(기존)**: `total`(kg) 그대로. 예: 2포대=40kg → `total=40`.
+  - **면적 비율 모드(신규)**: `rate_kg` + `rate_area` 있으면 `total = rate_kg × (필지면적 ÷ rate_area)`. 예: 1500평당 60kg → `rate_kg=60, rate_area=1500`. 필지면적 = `field_area`(직접 입력) 우선, 없으면 **실측 자동**(경계 면적 m², `operation_main`이 `field_area_m2`로 전달). `area_unit`=평(기본)/ha/m². 1평=3.3057851㎡. `rate_kg`&`rate_area` 있으면 `total` 무시.
+  - 하위호환: 비율 컬럼 없으면 기존 total 동작 그대로. total·비율 둘 다 없으면 경고 후 처방 스킵.
+  - 검증(CLI+exe): 절대40→40kg, 비율자동실측, 등기2500평×60/1500=100kg, 0.5ha×100/ha=50kg 전부 정확. exe 재빌드 `dist\VRA_Webapp_20260720.zip`.
 - **균등(비변량) 살포 처방맵**: 별도 모드 없이 **`spread=0`으로 설정**하면 됨 (2026-07-13 실증 — 전 등급 rate 동일 = total÷살포면적, 총량 정확 일치, Rx GeoTIFF 픽셀값 균일). `rate = flat_rate × (1 − 편차 × spread)` 공식에서 spread=0이면 편차항 소거. 나지(Zone 6) 자동 제외는 균등에서도 유지됨. 결과 PNG는 여전히 5색 등급 지도로 그려짐(GNDVI 분포 참고용) — 실살포량은 VRA.csv Rate 컬럼·Rx 픽셀값 기준. 중간값(0.5 등)으로 변량 강도 조절도 가능.
 - **CSV 인코딩**: 출력 ShapeFile/VRA CSV는 `euc-kr`로 저장된다(한글 파일명/필드명 호환).
 - **git 공유 시 권장 `.gitignore`**: `__pycache__/`, `.idea/`, 대용량 산출물(`result/`, `verification_reports/`, `.tif` 등). 코드와 `vra_setting/` 설정 CSV 위주로 공유 권장.

@@ -48,17 +48,82 @@ class VRACalculator:
             return None
         return self.vra_data.loc[field_code]
 
-    def calculate_prescription(self, field_code, zone_stats):
+    # 면적 단위 → m² 환산 계수 (1평 = 400/121 m²)
+    _UNIT_TO_M2 = {
+        '평': 3.3057851, 'pyeong': 3.3057851, 'py': 3.3057851, 'p': 3.3057851,
+        'ha': 10000.0, '헥타르': 10000.0, 'hectare': 10000.0,
+        'm2': 1.0, 'm²': 1.0, 'sqm': 1.0, '㎡': 1.0,
+    }
+
+    @staticmethod
+    def _num(field_info, key):
+        """설정 행에서 숫자값을 안전하게 추출 (컬럼 없음/빈칸/NaN → None)."""
+        try:
+            if key not in field_info.index:
+                return None
+            v = field_info[key]
+            if pd.isna(v):
+                return None
+            return float(v)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _resolve_total_kg(self, field_code, field_info, zone_stats, field_area_m2=None):
+        """농가별 비료 기준에 따라 목표 총량(kg)을 산출.
+
+        - 면적 비율 모드: `rate_kg`, `rate_area`가 있으면
+            total = rate_kg × (필지면적 ÷ rate_area)  (같은 area_unit 기준)
+            필지면적 = `field_area`(직접 입력) 우선, 없으면 실측 면적 자동.
+        - 절대량 모드: 위 컬럼이 없으면 기존 `total`(kg) 그대로.
+        """
+        rate_kg = self._num(field_info, 'rate_kg')
+        rate_area = self._num(field_info, 'rate_area')
+
+        if rate_kg is not None and rate_area is not None and rate_area > 0:
+            # 단위 파악 (기본 평)
+            unit_raw = '평'
+            if 'area_unit' in field_info.index and not pd.isna(field_info.get('area_unit')):
+                unit_raw = str(field_info['area_unit']).strip()
+            m2_per_unit = self._UNIT_TO_M2.get(unit_raw, self._UNIT_TO_M2.get(unit_raw.lower(), 3.3057851))
+
+            # 필지면적: 직접 입력(field_area) 우선, 없으면 실측(경계면적→격자합 순)
+            entered = self._num(field_info, 'field_area')
+            if entered is not None and entered > 0:
+                area_in_unit = entered
+                src = "입력"
+            else:
+                if field_area_m2 is None or field_area_m2 <= 0:
+                    field_area_m2 = sum(z['Area_m2'] for z in zone_stats)
+                area_in_unit = field_area_m2 / m2_per_unit
+                src = "실측"
+
+            total = rate_kg * (area_in_unit / rate_area)
+            print(f"    [비율계산] {rate_kg:g}kg / {rate_area:g}{unit_raw} × 필지 {area_in_unit:.1f}{unit_raw}({src}) "
+                  f"= 목표 총량 {total:.2f}kg")
+            return total
+
+        # 절대량 모드
+        total = self._num(field_info, 'total')
+        if total is None:
+            print(f"    [Warning] '{field_code}': total(절대량)도 rate_kg/rate_area(비율)도 없어 총량을 정할 수 없습니다.")
+            return None
+        return total
+
+    def calculate_prescription(self, field_code, zone_stats, field_area_m2=None):
         """
         zone_stats: List of dicts
+        field_area_m2: 실측 필지 전체 면적(m², 경계 기준). 비율 모드 자동 면적에 사용.
         """
         if self.vra_data is None or field_code not in self.vra_data.index:
             print(f"    [Warning] '{field_code}'에 대한 VRA 설정값을 찾을 수 없습니다.")
             return None
 
         field_info = self.vra_data.loc[field_code]
-        total_amount_kg = float(field_info['total'])
-        spread = float(field_info['spread'])
+        total_amount_kg = self._resolve_total_kg(field_code, field_info, zone_stats, field_area_m2)
+        if total_amount_kg is None:
+            return None
+        spread_val = self._num(field_info, 'spread')
+        spread = spread_val if spread_val is not None else 1.0
 
         # 기체 타입 인식 (csv에 drone_type 열이 없다면 DJI로 기본 인식)
         drone_type = str(field_info.get('drone_type', 'DJI')).strip().upper() if 'drone_type' in field_info else 'DJI'
