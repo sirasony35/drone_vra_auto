@@ -7,17 +7,39 @@ class VRACalculator:
         self.vra_data = self._load_vra_data(vra_csv_path)
 
     def _load_vra_data(self, path):
+        # 한국 엑셀 'CSV로 저장'은 기본이 cp949(euc-kr)이고, 웹/UTF-8 저장은 utf-8/utf-8-BOM.
+        # 어느 쪽이든 읽히도록 인코딩을 순서대로 시도한다. (utf-8류를 먼저 → 잘못된 바이트면
+        # 예외 발생해 다음으로 넘어가고, cp949는 대부분 바이트를 무오류로 디코드하므로 마지막)
+        encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr"]
+        df = None
+        last_err = None
+        for enc in encodings:
+            try:
+                df = pd.read_csv(path, encoding=enc)
+                if enc not in ("utf-8-sig", "utf-8"):
+                    print(f"    [Info] VRA CSV 인코딩 자동 감지: {enc}")
+                break
+            except (UnicodeDecodeError, UnicodeError) as e:
+                last_err = e
+                continue
+            except Exception as e:
+                # 인코딩 외 오류(형식 등)는 즉시 보고
+                print(f"    [Error] VRA 데이터 로드 실패: {e}")
+                return None
+        if df is None:
+            print(f"    [Error] VRA 데이터 로드 실패(인코딩 인식 불가): {last_err}")
+            return None
+
         try:
-            # CSV 읽기 (공백 제거 및 소문자 처리 등 전처리)
-            df = pd.read_csv(path)
-            df['field'] = df['field'].astype(str)
-
-            # 컬럼명 공백 제거
+            # 컬럼명·필지코드 앞뒤 공백 제거 (엑셀/수기 편집 편차 방어)
             df.columns = df.columns.str.strip()
-
+            if 'field' not in df.columns:
+                print(f"    [Error] VRA CSV에 'field' 컬럼이 없습니다. 컬럼: {list(df.columns)}")
+                return None
+            df['field'] = df['field'].astype(str).str.strip()
             return df.set_index('field')
         except Exception as e:
-            print(f"    [Error] VRA 데이터 로드 실패: {e}")
+            print(f"    [Error] VRA 데이터 전처리 실패: {e}")
             return None
 
     def get_field_info(self, field_code):

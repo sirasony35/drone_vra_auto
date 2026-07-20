@@ -17,9 +17,27 @@ import uuid
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
+from matplotlib import font_manager
 from scipy.ndimage import gaussian_filter, generic_filter
 from skimage.filters import threshold_otsu
 import warnings
+
+
+def _setup_korean_font():
+    """결과 지도(PNG) 제목·라벨의 한글 깨짐(□□□) 방지 — 한글 지원 폰트 지정.
+    Windows 기본 '맑은 고딕' 우선, 없으면 나눔/기타 순으로 탐색."""
+    candidates = ["Malgun Gothic", "NanumGothic", "NanumBarunGothic",
+                  "AppleGothic", "Gulim", "Batang", "Dotum"]
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in available:
+            plt.rcParams["font.family"] = name
+            break
+    # 한글 폰트 사용 시 음수 부호(−)가 깨지지 않도록
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+_setup_korean_font()
 
 # [모듈 Import]
 from boundary_detector import BoundaryDetector
@@ -487,7 +505,7 @@ def main():
 
     for tif_path in tif_files:
         filename = os.path.basename(tif_path)
-        field_code = filename.split("_")[0] if "_" in filename else "Unknown"
+        field_code = filename.split("_")[0].strip() if "_" in filename else "Unknown"
         print(f"\n>>> Processing: {filename} (Field Code: {field_code})")
 
         field_info = vra_calc.get_field_info(field_code)

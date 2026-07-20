@@ -167,6 +167,7 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **필지코드 규칙**: 모든 매칭이 파일명 맨 앞 토큰(`_` 또는 `.` 앞)을 필지코드로 사용한다. 입력 영상·경계 파일·CSV의 `field` 값·출력 파일명이 같은 코드로 일치해야 한다 (예: `SM01`, `GJR1`, `BD01`).
 - **기체별 동작 차이**: CSV의 `drone_type` 열로 DJI/XAG를 구분한다. 열이 없으면 DJI(기본). XAG는 3등급·격자 5m 강제 고정·JSON/KML 출력, DJI는 5등급·CSV 격자값·GeoTIFF/ShapeFile 출력.
 - **VRA 설정 CSV 컬럼**: `field, total, spread, crop, grid_size, sigma, masking`이 기본이며, 코드는 추가로 `drone_type, height, width`도 참조한다(`vra_calculator.py`, `operation_main.py`). 2026-07-05부터 `vra.csv`/`gj_vra.csv`는 10컬럼(`height,width,drone_type` 포함) 체계 — `drone_type`은 DJI/XAG 분기(미기재 시 DJI), `height`/`width`는 비행고도/살포폭으로 경계 shp DBF와 파일명에 반영. `sm_vra.csv`/`bd_vra.csv`는 아직 기본 7컬럼. `sigma`가 비어 있으면 자동 계산, `masking`은 나지 마스킹 강도(relax_factor)로 쓰인다.
+- **균등(비변량) 살포 처방맵**: 별도 모드 없이 **`spread=0`으로 설정**하면 됨 (2026-07-13 실증 — 전 등급 rate 동일 = total÷살포면적, 총량 정확 일치, Rx GeoTIFF 픽셀값 균일). `rate = flat_rate × (1 − 편차 × spread)` 공식에서 spread=0이면 편차항 소거. 나지(Zone 6) 자동 제외는 균등에서도 유지됨. 결과 PNG는 여전히 5색 등급 지도로 그려짐(GNDVI 분포 참고용) — 실살포량은 VRA.csv Rate 컬럼·Rx 픽셀값 기준. 중간값(0.5 등)으로 변량 강도 조절도 가능.
 - **CSV 인코딩**: 출력 ShapeFile/VRA CSV는 `euc-kr`로 저장된다(한글 파일명/필드명 호환).
 - **git 공유 시 권장 `.gitignore`**: `__pycache__/`, `.idea/`, 대용량 산출물(`result/`, `verification_reports/`, `.tif` 등). 코드와 `vra_setting/` 설정 CSV 위주로 공유 권장.
 - **vra_setting 폴더에는 .py 파일이 없다** — 설정용 CSV 3개(`vra.csv`, `sm_vra.csv`, `bd_vra.csv`)만 존재한다.
@@ -175,6 +176,15 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 ---
 
 # 변경 이력
+
+- **2026-07-12 vra.csv 한글 인코딩 자동 감지 + yc(연천) 데이터 대응**:
+  - **증상**: yc_data 신규 데이터(`경기도 연천군 전곡읍 은대리 1196(2)_260711_GNDVI.tif` = `지번주소_촬영일_GNDVI.tif`)에서 웹앱이 vra.csv 필지코드를 인식 못함. "한글 읽기 오류".
+  - **원인**: `VRACalculator._load_vra_data`가 `pd.read_csv(path)`(기본 utf-8)로만 읽음. 한국 엑셀 'CSV로 저장'은 기본이 **cp949(euc-kr)** → `'utf-8' codec can't decode byte 0xb0` 예외 → vra_data=None → 전 필지 인식 실패. (필지코드 추출 `split("_")[0]`은 정상 — 주소가 공백 구분이라 전체 주소가 필지코드. 쉼표·괄호도 utf-8 CSV에선 자동 따옴표로 무해)
+  - **수정**(`vra_calculator.py`): 인코딩 `[utf-8-sig, utf-8, cp949, euc-kr]` 순차 시도(utf-8류 먼저 → 잘못된 바이트면 예외로 넘어가고 cp949는 마지막). `field` 컬럼 없으면 명확 오류. 필지코드·컬럼명 `.str.strip()`. `operation_main.py` 필지코드 추출에도 `.strip()`.
+  - **필지코드 = 전체 지번주소**(예: `경기도 연천군 전곡읍 은대리 1196(2)`). vra.csv의 field에 이 주소 문자열 그대로 넣어야 매칭. 출력 파일명도 이 주소(쉼표·괄호·공백 포함) — Windows 허용. **주의: 긴 한글주소 + 깊은 jobs 경로 → MAX_PATH(260) 초과 가능성**(exe를 얕은 경로에 설치 권장).
+  - **`vra_setting/yc_vra.csv` 신규**: yc_data 68개 고유 필지코드 자동 추출 템플릿(utf-8-sig=엑셀 한글 정상, total 60/DJI 기본). 사용자가 필지별 total 조정 후 사용.
+  - 검증: CLI + exe 양쪽에서 cp949 vra.csv + 한글주소 GNDVI(1196(2)) E2E 통과 — 인코딩 자동감지 로그, DJI Rx/tfw/ShapeFile/VRA.csv/PNG 전량 생성(한글 파일명 유지). exe 재빌드 → `dist\VRA_Webapp_20260712.zip`(170MB).
+  - **결과 PNG 제목 한글 깨짐(□□□) 수정**: matplotlib 기본 폰트(DejaVu Sans)에 한글 글리프 없음. `operation_main.py`에 `_setup_korean_font()` 추가 — `font_manager.ttflist`에서 [Malgun Gothic, NanumGothic, Gulim, Batang, Dotum] 순 탐색해 `plt.rcParams["font.family"]` 지정 + `axes.unicode_minus=False`. Windows엔 맑은 고딕 기본 존재. **PyInstaller frozen에서도 시스템 폰트(C:\Windows\Fonts) 스캔 정상** — exe 산출 PNG로 한글 제목 렌더 확인. 이 수정도 0712 exe에 포함.
 
 - **2026-07-10 웹앱 'PNG만 생성' UX 결함 수정 + exe 재빌드**:
   - **증상**: 사용자가 처방맵 zip을 받았는데 Result.png만 있고 DJI Rx/ShapeFile·XAG JSON(기체 로드용 데이터)이 없음.
