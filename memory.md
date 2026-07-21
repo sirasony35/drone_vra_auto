@@ -183,6 +183,11 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 # 변경 이력
 
+- **2026-07-21 출력 파일명 짧게(드론 표시용) + XAG Pix4D 구조 재적용**:
+  - **짧은 파일명**(`operation_main.short_field_name`): 주소형 필지코드에서 앞쪽 행정구역(도/시/군/구) 토큰 제거 + 뒤 정보(_DJI_1m_H3m_W5m_날짜) 생략. 예: `경기도 화성시 만세구 우정읍 이화리 1409` → 파일명 `우정읍 이화리 1409.tif`. 이유: 드론 화면에서 필지명이 너무 길어 구분 안 됨(앞부분 도·시·구가 전부 공통). 적용: DJI Rx tif/tfw·경계 shp·PNG·VRA.csv, XAG kml/json, shp DBF `name` 속성. `HSR1`/`GJR5` 등 비주소 코드는 그대로. 필지코드 매칭·요약 '필지' 컬럼·VRA Field는 내부적으로 full 유지(추적성). 사용자 확정: 도·시·구 제거 + 뒤 정보 제거.
+  - **XAG Pix4D 구조 재적용(회귀 수정)**: git 되돌림으로 `save_xag_files_wgs84`의 2026-07-07 Pix4D 호환 수정이 롤백돼 있었음(Folder 래퍼 부활, 내부 링 누락, dosage 소수). 재적용: KML `<Folder>` 제거(Document 바로 아래 Placemark), `<innerBoundaryIs>` 내부 링, dosage `int(round())` 정수화. 검증: 생성 KML 요소 트리 = `pix4d_data/GJR5_XAG` 완전일치, dosage 정수. **DJI Pix4D 수정(tfw 반픽셀·DBF)은 롤백 안 됨(현존). git revert 시 XAG만 영향받은 듯 — 되돌림 재발 감시.**
+  - exe 재빌드 → `dist\VRA_Webapp_20260721.zip`(170MB). hs 주소 필지 exe E2E: 파일명 도/시/구 없음·짧은 이름 정상.
+
 - **2026-07-12 vra.csv 한글 인코딩 자동 감지 + yc(연천) 데이터 대응**:
   - **증상**: yc_data 신규 데이터(`경기도 연천군 전곡읍 은대리 1196(2)_260711_GNDVI.tif` = `지번주소_촬영일_GNDVI.tif`)에서 웹앱이 vra.csv 필지코드를 인식 못함. "한글 읽기 오류".
   - **원인**: `VRACalculator._load_vra_data`가 `pd.read_csv(path)`(기본 utf-8)로만 읽음. 한국 엑셀 'CSV로 저장'은 기본이 **cp949(euc-kr)** → `'utf-8' codec can't decode byte 0xb0` 예외 → vra_data=None → 전 필지 인식 실패. (필지코드 추출 `split("_")[0]`은 정상 — 주소가 공백 구분이라 전체 주소가 필지코드. 쉼표·괄호도 utf-8 CSV에선 자동 따옴표로 무해)

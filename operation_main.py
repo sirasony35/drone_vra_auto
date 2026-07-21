@@ -50,10 +50,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/hs_data"
+DATA_FOLDER = "data/hs_service_data"
 BOUNDARY_FOLDER = "data/hs_boundary"
-OUTPUT_FOLDER = "result/hs_0720"
-VRA_CSV_PATH = "vra_setting/hs_vra.csv"
+OUTPUT_FOLDER = "result/hs_service_0721"
+VRA_CSV_PATH = "vra_setting/hs_service_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -289,6 +289,22 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
 # ======================================================
 # 2. DJI & XAG 내보내기 함수
 # ======================================================
+def short_field_name(field_code):
+    """드론 화면 표시용 짧은 필지명 — 앞쪽 행정구역(도/시/군/구)을 제거하고
+    읍/면/동/리부터 남긴다. 예: '경기도 화성시 만세구 우정읍 이화리 1409' → '우정읍 이화리 1409'.
+    주소가 아닌 코드(예: 'HSR1', 'GJR5')는 공백/행정접미사가 없어 그대로 반환된다."""
+    tokens = str(field_code).split()
+    if not tokens:
+        return str(field_code)
+    drop = ('도', '시', '군', '구')
+    i = 0
+    while i < len(tokens) and tokens[i].endswith(drop):
+        i += 1
+    if i >= len(tokens):     # 전부 잘리면(비정상) 원본 유지
+        return str(field_code)
+    return " ".join(tokens[i:]).strip() or str(field_code)
+
+
 def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_height=0, swath_width=0, grid_size=1.0):
     print(f"  [Output] Generating DJI Compatible Files (WGS84) with {grid_size}m grid resolution...")
     rx_folder = os.path.join(OUTPUT_FOLDER, "DJI", "Rx")
@@ -296,12 +312,9 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
     os.makedirs(rx_folder, exist_ok=True)
     os.makedirs(shp_folder, exist_ok=True)
 
-    current_date = datetime.datetime.now().strftime("%m%d")
-    grid_str = f"{grid_size:g}"
-    if flight_height > 0 and swath_width > 0:
-        filename_base = f"{field_code}_DJI_{grid_str}m_H{flight_height:g}m_W{swath_width:g}m_{current_date}"
-    else:
-        filename_base = f"{field_code}_DJI_{grid_str}m_{current_date}"
+    # 드론 표시용 짧은 이름 사용 (도/시/군/구 제거, 뒤 기체·격자·날짜 정보 생략)
+    short = short_field_name(field_code)
+    filename_base = short
 
     # Pix4D 호환: 경계 ShapeFile에 비행고도(height)/살포폭(line_space)/이름(name) 속성 포함 (UTF-8)
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
@@ -310,11 +323,11 @@ def save_dji_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, flight_heig
         {
             'height': [float(flight_height) if flight_height > 0 else 3.0],
             'line_space': [float(swath_width) if swath_width > 0 else 5.0],
-            'name': [f"{field_code}_변량시비맵"],
+            'name': [short],
         },
         geometry=[boundary_geom_4326], crs="EPSG:4326"
     )
-    boundary_out = os.path.join(shp_folder, f"{field_code}.shp")
+    boundary_out = os.path.join(shp_folder, f"{short}.shp")
     boundary_attr.to_file(boundary_out, encoding='utf-8')
 
     rate_map = {}
@@ -365,9 +378,8 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
     xag_folder = os.path.join(OUTPUT_FOLDER, "XAG")
     os.makedirs(xag_folder, exist_ok=True)
 
-    current_date = datetime.datetime.now().strftime("%m%d")
-    grid_str = f"{grid_size:g}"
-    filename_base = f"{field_code}_XAG_{grid_str}m_{current_date}"
+    # 드론 표시용 짧은 이름 (도/시/군/구 제거, 뒤 정보 생략)
+    filename_base = short_field_name(field_code)
 
     # 1. 바운더리를 WGS84로 변환 및 멀티폴리곤 강제 병합
     boundary_4326 = boundary_gdf.to_crs(epsg=4326)
@@ -386,7 +398,18 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
         wkt_str += f",({format_coords_wkt(interior.coords)})"
     wkt_str += ")"
 
-    # 2. XAG KML 생성
+    # 내부 링(구멍)도 KML에 반영 — WKT(borderWKT)와 경계 일치 보장
+    inner_rings = ""
+    for interior in geom.interiors:
+        inner_coords = " ".join([f"{lon:.8f},{lat:.8f}" for lon, lat in interior.coords])
+        inner_rings += f"""
+    <innerBoundaryIs>
+     <LinearRing>
+      <coordinates>{inner_coords}</coordinates>
+     </LinearRing>
+    </innerBoundaryIs>"""
+
+    # 2. XAG KML 생성 (Pix4D 구조 일치: Folder 래퍼 없이 Document 바로 아래 Placemark)
     kml_content = f"""<?xml version='1.0' encoding='utf-8'?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
  <Document id="root_doc">
@@ -394,30 +417,31 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
    <SimpleField name="type" type="string"/>
    <SimpleField name="visualType" type="string"/>
   </Schema>
-  <Folder>
-   <name>Field_Boundary</name>
-   <Placemark id="layer.1">
-    <name>{filename_base}</name>
-    <description>Boundaries</description>
-    <Style>
-     <LineStyle><color>ff0000ff</color></LineStyle>
-     <PolyStyle><fill>0</fill></PolyStyle>
-    </Style>
-    <ExtendedData>
-     <SchemaData schemaUrl="#layer">
-      <SimpleData name="type">boundary</SimpleData>
-      <SimpleData name="visualType">BOUNDARY</SimpleData>
-     </SchemaData>
-    </ExtendedData>
-    <Polygon>
-     <outerBoundaryIs>
-      <LinearRing>
-       <coordinates>{kml_coords}</coordinates>
-      </LinearRing>
-     </outerBoundaryIs>
-    </Polygon>
-   </Placemark>
-  </Folder>
+  <Placemark id="layer.1">
+   <name>{filename_base}</name>
+   <description>Boundaries</description>
+   <Style>
+    <LineStyle>
+     <color>ff0000ff</color>
+    </LineStyle>
+    <PolyStyle>
+     <fill>0</fill>
+    </PolyStyle>
+   </Style>
+   <ExtendedData>
+    <SchemaData schemaUrl="#layer">
+     <SimpleData name="type">boundary</SimpleData>
+     <SimpleData name="visualType">BOUNDARY</SimpleData>
+    </SchemaData>
+   </ExtendedData>
+   <Polygon>
+    <outerBoundaryIs>
+     <LinearRing>
+      <coordinates>{kml_coords}</coordinates>
+     </LinearRing>
+    </outerBoundaryIs>{inner_rings}
+   </Polygon>
+  </Placemark>
  </Document>
 </kml>"""
     kml_out = os.path.join(xag_folder, f"{filename_base}_Boundary.kml")
@@ -453,8 +477,9 @@ def save_xag_files_wgs84(grid_gdf, vra_df, boundary_gdf, field_code, grid_size=1
             rate_val = float(row['Rate(kg/ha)'])
             if zone_idx in [1, 2, 3]:
                 # XAG의 dosage 단위(g/m²)에 맞게 kg/ha 값을 10으로 나눔
-                dosage_g_m2 = rate_val / 10.0
-                data_type_level.append({"dosage": round(dosage_g_m2, 2), "level": zone_idx})
+                # Pix4D 호환: dosage는 정수로 저장 (Pix4D 산출물이 정수 체계)
+                dosage_g_m2 = int(round(rate_val / 10.0))
+                data_type_level.append({"dosage": dosage_g_m2, "level": zone_idx})
         except:
             continue
 
@@ -675,7 +700,7 @@ def main():
                     save_dji_files_wgs84(grid, vra_df, boundary, field_code, flight_height=f_height,
                                          swath_width=f_width, grid_size=current_grid_size)
 
-                vra_out_name = f"{field_code}_{drone_type}_VRA.csv"
+                vra_out_name = f"{short_field_name(field_code)}_VRA.csv"
                 vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
 
                 # 전체 요약(엑셀)용 1행 집계
@@ -697,8 +722,9 @@ def main():
                     "평균살포량(kg/ha)": round(avg_rate, 1),
                 })
 
-            out_img_name = f"{field_code}_{drone_type}_Result.png"
-            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name), f"Result: {field_code} ({drone_type})",
+            out_img_name = f"{short_field_name(field_code)}_Result.png"
+            save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
+                           f"Result: {short_field_name(field_code)} ({drone_type})",
                            zone_col='Zone', boundary_gdf=boundary, max_zone=current_n_zones)
 
             mem_raster.close()
