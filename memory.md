@@ -185,8 +185,22 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **균등(비변량) 살포 처방맵**: 별도 모드 없이 **`spread=0`으로 설정**하면 됨 (2026-07-13 실증 — 전 등급 rate 동일 = total÷살포면적, 총량 정확 일치, Rx GeoTIFF 픽셀값 균일). `rate = flat_rate × (1 − 편차 × spread)` 공식에서 spread=0이면 편차항 소거. 나지(Zone 6) 자동 제외는 균등에서도 유지됨. 결과 PNG는 여전히 5색 등급 지도로 그려짐(GNDVI 분포 참고용) — 실살포량은 VRA.csv Rate 컬럼·Rx 픽셀값 기준. 중간값(0.5 등)으로 변량 강도 조절도 가능.
 - **CSV 인코딩**: 출력 ShapeFile/VRA CSV는 `euc-kr`로 저장된다(한글 파일명/필드명 호환).
 - **git 공유 시 권장 `.gitignore`**: `__pycache__/`, `.idea/`, 대용량 산출물(`result/`, `verification_reports/`, `.tif` 등). 코드와 `vra_setting/` 설정 CSV 위주로 공유 권장.
-- **vra_setting 폴더에는 .py 파일이 없다** — 설정용 CSV 3개(`vra.csv`, `sm_vra.csv`, `bd_vra.csv`)만 존재한다.
+- **vra_setting 폴더에는 .py 파일이 없다** — 지역별 설정 CSV들만 존재(위 폴더 구조 참조).
 - **`pix4d_자동화 비교.pptx`**: 본 자동화 결과와 Pix4D 결과를 비교한 발표/검토 자료. 코드 동작과는 직접 관련 없는 참고 문서.
+
+## 신규 지역 처방 표준 절차 (2026-07 확립, 이천·남해·옥천·당진에 반복 적용)
+
+1. **필지코드 = 파일명 첫 `_` 앞 토큰**. 주소형(`경상남도 남해군 고현면 대곡리 167`)도 그대로 코드가 됨.
+2. **지번 언더바 충돌 점검 필수**: `254_1`, `659_2`처럼 지번 부번을 `_`로 쓴 파일은 첫 토큰이 잘려 서로 뭉침(collision). 발견 시 파일명 `_`→`-`로 rename(GNDVI+RGB 둘 다). `[숫자]_[숫자]_[6자리날짜]` 정규식으로 탐지. `경기`(축약)→`경기도`도 통일 필요할 수 있음.
+3. **vra.csv 생성**: 14컬럼 스키마(`field,total,spread,crop,grid_size,sigma,masking,height,width,drone_type,rate_kg,rate_area,field_area,area_unit`) + 필요시 `경작자`. `field_area`는 `detect_boundary_footprint`로 실측(평, ÷3.3057851) 채워줌.
+4. **비료 세팅**: 면적비율=`rate_kg`+`rate_area`(예 300평당 20kg→20/300), 절대량=`total`, 균등=`spread=0`. 한 CSV에 혼용 가능. 1포=20kg.
+5. **기체/격자**: DJI=1m 격자(소필지도 OK), XAG=5m 강제(80~110평 소필지는 처방 실패—격자0/등급화불가). 소필지 있으면 DJI 권장.
+6. **검증** → `operation_main.py` 경로 4개 수정 → 실행 → `result/<region>_<날짜>/`. 검증 스크립트로 CSV↔폴더 매칭·계산방식 충돌·경작자별 설정 일관성 확인.
+7. **완료 필지 분리**: 이미 살포한 필지는 `data/<region>_완료/`로 이동(코드 기준), vra.csv엔 대상만 남김.
+
+## Windows 콘솔/파일 주의
+- CSV·요약을 Excel에서 **열어둔 채** 저장 요청하면 `PermissionError`(파일 잠금) — 닫아야 기록됨. 측정값은 json 캐시 후 잠금 풀리면 기록하는 패턴 사용.
+- 스크립트 실행 시 `$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"`.
 
 ---
 
