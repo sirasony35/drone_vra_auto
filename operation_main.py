@@ -50,10 +50,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/hs_service_data"
-BOUNDARY_FOLDER = "data/hs_boundary"
-OUTPUT_FOLDER = "result/hs_service_0721"
-VRA_CSV_PATH = "vra_setting/hs_service_vra.csv"
+DATA_FOLDER = "data/gj_data"
+BOUNDARY_FOLDER = "data/gj_boundary"
+OUTPUT_FOLDER = "result/gj_0727"
+VRA_CSV_PATH = "vra_setting/gj_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -256,7 +256,8 @@ def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, f
     return grid_gdf
 
 
-def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None, max_zone=5):
+def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None, max_zone=5,
+                   info_text=""):
     if max_zone == 3:
         colors = ['#FF0000', '#FFFF00', '#008000', '#808080']
         labels = ["1(High)", "2(Medium)", "3(Low)", "6(Skip)"]
@@ -280,7 +281,12 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
 
     legend_patches = [mpatches.Patch(color=c, label=l) for c, l in zip(colors, labels)]
     ax.legend(handles=legend_patches, loc='lower right', title="Levels")
-    ax.set_title(f"Zonation Map {title_suffix}", fontsize=15)
+    # 제목: 폰트 축소 + 상단 여백 확보(정보 줄과 겹치지 않도록)
+    ax.set_title(f"Zonation Map {title_suffix}", fontsize=11, pad=22)
+    # 확인용 정보(총 면적/총 비료량)를 제목 바로 아래 별도 줄로 배치
+    if info_text:
+        ax.text(0.5, 1.0, info_text, transform=ax.transAxes, ha='center', va='bottom',
+                fontsize=10, color='#1a3c5e', fontweight='bold')
     ax.set_axis_off()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
@@ -532,6 +538,70 @@ def _calc_mode_label(field_info):
     return "절대량"
 
 
+def _field_str(field_info, key):
+    """설정 행에서 문자열 값 안전 추출 (컬럼 없음/빈칸/NaN → '')."""
+    if field_info is None:
+        return ""
+    try:
+        if key not in field_info.index:
+            return ""
+        v = field_info[key]
+        if pd.isna(v):
+            return ""
+        return str(v).strip()
+    except Exception:
+        return ""
+
+
+def _fert_setting_label(field_info):
+    """처음 세팅한 비료 기준을 표기용 문자열로. 예: 면적비율 '400평에 20kg', 절대 '60kg (절대)'."""
+    if field_info is None:
+        return ""
+    rk = VRACalculator._num(field_info, 'rate_kg')
+    ra = VRACalculator._num(field_info, 'rate_area')
+    if rk is not None and ra is not None:
+        unit = _field_str(field_info, 'area_unit') or '평'
+        return f"{ra:g}{unit}에 {rk:g}kg"
+    total = VRACalculator._num(field_info, 'total')
+    if total is not None:
+        return f"{total:g}kg (절대)"
+    return ""
+
+
+def consolidate_uniform_vra(vra_df):
+    """균등 처방(살포 구역들의 kg/ha가 모두 동일)일 때 VRA.csv 표시를 정리.
+    5개 등급이 같은 값으로 나열돼 변량처럼 보이는 혼동을 없애기 위해,
+    살포 구역을 단일 '균등(Uniform)' 행으로 합치고 나지(Zone 6)는 0으로 유지한다.
+    (실제 Rx 처방맵 생성은 원본 vra_df를 쓰므로 영향 없음 — 표시 전용)"""
+    def zidx(z):
+        try:
+            return int(str(z).split('(')[0])
+        except Exception:
+            return -1
+    spray = vra_df[vra_df['Zone'].apply(lambda z: zidx(z) != 6)]
+    skip = vra_df[vra_df['Zone'].apply(lambda z: zidx(z) == 6)]
+    if len(spray) <= 1:
+        return vra_df
+    rates = spray['Rate(kg/ha)'].round(2).unique()
+    if len(rates) != 1:
+        return vra_df   # 변량 → 그대로
+    area = float(spray['Area(ha)'].sum())
+    total = float(spray['Total(kg)'].sum())
+    gndvi = float((spray['GNDVI'] * spray['Area(ha)']).sum() / area) if area > 0 else float(spray['GNDVI'].mean())
+    row = {
+        'Field': spray['Field'].iloc[0],
+        'Zone': '균등(Uniform)',
+        'GNDVI': round(gndvi, 4),
+        'Area(ha)': round(area, 4),
+        'Rate(kg/ha)': float(rates[0]),
+        'Total(kg)': round(total, 2),
+    }
+    out = pd.DataFrame([row], columns=vra_df.columns)
+    if len(skip) > 0:
+        out = pd.concat([out, skip[vra_df.columns]], ignore_index=True)
+    return out
+
+
 def save_run_summary(rows, output_folder):
     """실행한 전체 필지의 처방 결과를 한 파일(엑셀)로 저장.
     xlsx 우선, 실패 시 CSV(utf-8-sig, 엑셀에서 한글 정상)로 대체."""
@@ -693,6 +763,7 @@ def main():
             f_height = float(field_info.get('height', 0)) if field_info is not None else 0
             f_width = float(field_info.get('width', 0)) if field_info is not None else 0
 
+            img_info = ""   # 확인용 이미지에 표시할 '총 O평 / 비료 O kg' 텍스트
             if vra_df is not None:
                 if drone_type == 'XAG':
                     save_xag_files_wgs84(grid, vra_df, boundary, field_code, grid_size=current_grid_size)
@@ -701,7 +772,9 @@ def main():
                                          swath_width=f_width, grid_size=current_grid_size)
 
                 vra_out_name = f"{short_field_name(field_code)}_VRA.csv"
-                vra_df.to_csv(os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
+                # CSV 표시용: 균등 처방이면 단일 '균등' 행으로 합쳐 저장 (Rx 생성은 위에서 원본 vra_df 사용 완료)
+                consolidate_uniform_vra(vra_df).to_csv(
+                    os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
 
                 # 전체 요약(엑셀)용 1행 집계
                 total_kg = float(vra_df['Total(kg)'].sum())
@@ -709,10 +782,15 @@ def main():
                 spray_py = spray_ha * 10000.0 / PYEONG_M2
                 field_py = (field_area_m2 / PYEONG_M2) if field_area_m2 else None
                 avg_rate = (total_kg / spray_ha) if spray_ha > 0 else 0.0
+                # 확인용 이미지 정보: 총 필지면적(평) / 총 비료량(kg, 포)
+                area_disp = field_py if field_py else spray_py
+                img_info = f"총 {area_disp:,.0f}평  |  비료 {total_kg:,.1f}kg ({total_kg / BAG_KG:.1f}포)"
                 summary_rows.append({
                     "필지": field_code,
+                    "경작자": _field_str(field_info, '경작자'),
                     "기체": drone_type,
                     "계산방식": _calc_mode_label(field_info),
+                    "비료기준": _fert_setting_label(field_info),
                     "총비료량(kg)": round(total_kg, 2),
                     "포대수(20kg)": round(total_kg / BAG_KG, 2),
                     "필요포대수(올림)": int(math.ceil(total_kg / BAG_KG)),
@@ -725,7 +803,8 @@ def main():
             out_img_name = f"{short_field_name(field_code)}_Result.png"
             save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
                            f"Result: {short_field_name(field_code)} ({drone_type})",
-                           zone_col='Zone', boundary_gdf=boundary, max_zone=current_n_zones)
+                           zone_col='Zone', boundary_gdf=boundary, max_zone=current_n_zones,
+                           info_text=img_info)
 
             mem_raster.close()
             print("  - Processing Complete.")

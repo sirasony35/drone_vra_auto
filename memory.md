@@ -24,9 +24,15 @@ drone_vra_auto/
 ├── verification_tool.py       # 파이썬 결과 vs Pix4D 결과 비교/검증 도구
 │
 ├── vra_setting/               # 필지별 VRA 설정 CSV (코드 없음, 데이터만 존재)
-│   ├── vra.csv                # 광주/월(GJR…) 벼 필지 설정
-│   ├── sm_vra.csv             # SM… 밀 필지 설정
-│   └── bd_vra.csv             # BD… 밀 필지 설정
+│   ├── gj_vra.csv             # 광주/김제(GJR…) 벼 필지
+│   ├── hs_vra.csv             # 화성(HSR…) — 지역별 진행분
+│   ├── hs_service_vra.csv     # 화성 서비스(주소형 필지코드)
+│   ├── icheon_vra.csv         # 경기 이천(주소형, 경작자 컬럼 포함)
+│   ├── namhae_vra.csv         # 경남 남해(주소형)
+│   ├── okcheon_vra.csv        # 충북 옥천(주소형)
+│   ├── dangjin_vra.csv        # 충남 당진(주소형)
+│   ├── gj_webapp_vra.csv, sm_vra.csv, bd_vra.csv  # 기타/구형
+│   └── 이천필지.xlsx           # 이천 원본 대장(경작자·주소·비료량) — 매칭 소스
 │
 ├── data/                      # 입력 데이터
 │   ├── sm_data/               # SM 필지 GNDVI / RGB GeoTIFF 입력 영상
@@ -46,7 +52,7 @@ drone_vra_auto/
 └── .idea/                     # PyCharm 프로젝트 설정 — git 무시 권장
 ```
 
-> 참고: `operation_main.py`의 경로 상수(`DATA_FOLDER`, `OUTPUT_FOLDER`, `VRA_CSV_PATH` 등)는 실행하는 작업마다 코드 상단에서 직접 수정하여 사용한다. 현재 커밋된 값은 `data/sm_hm_test_data`, `result/result_0604`, `vra_setting/sm_hm_vra.csv`이며(2026-06-30 기준), 위 폴더 구조의 실제 데이터 폴더명과 다를 수 있으니 실행 전 경로를 맞춰야 한다.
+> 참고: `operation_main.py`의 경로 상수(`DATA_FOLDER`, `BOUNDARY_FOLDER`, `OUTPUT_FOLDER`, `VRA_CSV_PATH`)는 실행하는 작업마다 코드 상단에서 직접 수정하여 사용한다. 마지막 실행 흔적으로 남아있을 뿐 지역마다 바꿔야 한다(예: `data/당진`, `result/dangjin_0727`, `vra_setting/dangjin_vra.csv`). 경계 파일이 없는 지역은 `BOUNDARY_FOLDER`를 빈 폴더로 두면 `BOUNDARY_METHOD='footprint'`로 자동 감지된다.
 
 ---
 
@@ -167,6 +173,9 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **필지코드 규칙**: 모든 매칭이 파일명 맨 앞 토큰(`_` 또는 `.` 앞)을 필지코드로 사용한다. 입력 영상·경계 파일·CSV의 `field` 값·출력 파일명이 같은 코드로 일치해야 한다 (예: `SM01`, `GJR1`, `BD01`).
 - **기체별 동작 차이**: CSV의 `drone_type` 열로 DJI/XAG를 구분한다. 열이 없으면 DJI(기본). XAG는 3등급·격자 5m 강제 고정·JSON/KML 출력, DJI는 5등급·CSV 격자값·GeoTIFF/ShapeFile 출력.
 - **VRA 설정 CSV 컬럼**: `field, total, spread, crop, grid_size, sigma, masking`이 기본이며, 코드는 추가로 `drone_type, height, width`도 참조한다(`vra_calculator.py`, `operation_main.py`). 2026-07-05부터 `vra.csv`/`gj_vra.csv`는 10컬럼(`height,width,drone_type` 포함) 체계 — `drone_type`은 DJI/XAG 분기(미기재 시 DJI), `height`/`width`는 비행고도/살포폭으로 경계 shp DBF와 파일명에 반영. `sm_vra.csv`/`bd_vra.csv`는 아직 기본 7컬럼. `sigma`가 비어 있으면 자동 계산, `masking`은 나지 마스킹 강도(relax_factor)로 쓰인다.
+- **균등 처방 VRA.csv 단일행 통합 (2026-07-27)**: spread=0 등 살포구역 kg/ha가 전부 동일하면, VRA.csv에서 5개 등급이 같은 값으로 나열돼 변량처럼 보이던 혼동 제거. `consolidate_uniform_vra()`가 살포구역을 단일 `균등(Uniform)` 행(면적·총량 합산, GNDVI 면적가중평균)으로 합치고 나지(Zone6)만 0 유지. **CSV 표시 전용 — Rx GeoTIFF/PNG는 원본 vra_df로 생성돼 영향 없음**(전 구역 균일값 그대로). 변량(rate 상이)이면 미적용. exe 재빌드 `dist\VRA_Webapp_20260727.zip`. GJR11(균등)·GJR1(변량) 및 exe E2E 검증.
+- **확인용 이미지(Result.png)에 총면적/총비료량 표시 (2026-07-27)**: `save_map_image`에 `info_text` 파라미터 추가 — 제목 아래 별도 줄로 `총 O평 | 비료 O kg (O포)` 표기(면적=필지면적 평, 비료=처방 총량). main()에서 `img_info` 구성해 전달(vra_df None이면 빈 문자열). 제목 폰트 15→11·pad=22로 겹침 해소, 정보는 fontsize 10·bold·남색. exe 재빌드 `dist\VRA_Webapp_20260727.zip`. 옥천 21필지 재생성으로 검증.
+- **처방요약.xlsx 컬럼 확장 (2026-07-23)**: `경작자`(vra.csv에 경작자 컬럼 있으면 자동), `비료기준`(처음 세팅 표기 — 면적비율 '400평에 20kg' / 절대 '60kg (절대)') 2개 추가. `_field_str`·`_fert_setting_label` 헬퍼. exe 재빌드 `dist\VRA_Webapp_20260723.zip`. 이천 46필지 icheon_0723 재생성으로 검증. 최종 컬럼: 필지·경작자·기체·계산방식·비료기준·총비료량·포대수·필요포대수·필지면적·살포면적(평/ha)·평균살포량.
 - **전체 처방 요약 엑셀 출력 (2026-07-20 추가, `operation_main.save_run_summary`)**: 한 번 실행한 전체 필지를 한 파일로. OUTPUT_FOLDER 최상위에 `처방요약.xlsx`(openpyxl, 실패 시 `처방요약.csv` utf-8-sig 폴백). 컬럼: 필지, 기체, 계산방식(면적비율/절대량), 총비료량(kg), 포대수(20kg), 필요포대수(올림), 필지면적(평), 살포면적(평), 살포면적(ha), 평균살포량(kg/ha). 1포대=20kg 상수(`BAG_KG`), 1평=3.3057851㎡(`PYEONG_M2`). main() 루프에서 필지별 1행 집계 후 루프 종료 시 저장. 웹앱 zip에 자동 포함. **exe 빌드에 `--collect-submodules openpyxl` 추가 필수**(없으면 xlsx 실패→csv 폴백). exe E2E 검증 통과.
 - **비료량 입력 방식 2종 (2026-07-20 추가, `vra_calculator._resolve_total_kg`)**: 농가별 비료 기준 대응.
   - **절대량 모드(기존)**: `total`(kg) 그대로. 예: 2포대=40kg → `total=40`.
