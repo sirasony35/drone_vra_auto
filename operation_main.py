@@ -52,7 +52,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 DATA_FOLDER = "data/gj_data"
 BOUNDARY_FOLDER = "data/gj_boundary"
-OUTPUT_FOLDER = "result/gj_0727"
+OUTPUT_FOLDER = "result/gj_0731"
 VRA_CSV_PATH = "vra_setting/gj_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
@@ -782,9 +782,10 @@ def main():
                 spray_py = spray_ha * 10000.0 / PYEONG_M2
                 field_py = (field_area_m2 / PYEONG_M2) if field_area_m2 else None
                 avg_rate = (total_kg / spray_ha) if spray_ha > 0 else 0.0
-                # 확인용 이미지 정보: 총 필지면적(평) / 총 비료량(kg, 포)
+                # 확인용 이미지 정보: 총 필지면적(평) / 총 비료량(kg, 포) / 그리드 크기
                 area_disp = field_py if field_py else spray_py
-                img_info = f"총 {area_disp:,.0f}평  |  비료 {total_kg:,.1f}kg ({total_kg / BAG_KG:.1f}포)"
+                img_info = (f"총 {area_disp:,.0f}평  |  비료 {total_kg:,.1f}kg ({total_kg / BAG_KG:.1f}포)"
+                            f"  |  그리드 {current_grid_size:g}m")
                 summary_rows.append({
                     "필지": field_code,
                     "경작자": _field_str(field_info, '경작자'),
