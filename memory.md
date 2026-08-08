@@ -200,11 +200,23 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 ## Windows 콘솔/파일 주의
 - CSV·요약을 Excel에서 **열어둔 채** 저장 요청하면 `PermissionError`(파일 잠금) — 닫아야 기록됨. 측정값은 json 캐시 후 잠금 풀리면 기록하는 패턴 사용.
+- **사용자용 CSV는 CRLF + UTF-8 BOM(utf-8-sig)으로 저장할 것** (2026-08-05 확인): LF-only로 저장하면 사용자 환경(메모장/엑셀)에서 행이 한 줄로 붙어 보임("행이 이상하다"). 한글 컬럼값(평 등)은 BOM 없으면 엑셀에서 깨짐. `VRACalculator`는 utf-8-sig 우선 시도라 호환.
 - 스크립트 실행 시 `$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"`.
 
 ---
 
 # 변경 이력
+
+- **2026-08-05 GR 처방 생성 완료 (`result/gr_0805`)**:
+  - 실행 직전 사용자 CSV 수정: GRR1·2·10에 `total=20` 기입 — 코드상 비율 모드가 total보다 우선이므로 **해당 3필지의 rate_kg/rate_area를 비워 절대량 20kg 적용**(사용자 의도 해석, 재발 시 동일 처리). 최종: 3필지 절대량 20kg + 9필지 비율(900평당 40kg).
+  - 12필지 전부 XAG(5m/3등급) 성공: KML+Prescription JSON(무결성 검증 — weightData=rows×cols, dosage 정수 g/m², cellSize 5), 총량 정확(합 ~449kg), 처방요약.xlsx 정상.
+  - **XAG 5m 커버리지 주의 재확인**: 좁은/작은 필지에서 살포면적 손실 큼 — GRR2 68%(303/446평, 좁은 사선형), GRR12 69%, GRR5 75%, GRR10 76%. 나머지는 79~96%. 평균살포량이 그만큼 농축됨(GRR2 200kg/ha). XAG 강제 5m 특성이라 구조적 한계 — 좁은 필지는 DJI 1m 권장.
+
+- **2026-08-05 GR(고령?) 신규 지역 세팅 (`vra_setting/gr_vra.csv` 신규, 실행 대기)**:
+  - `data/gr_data` GRR1~12 (260803 촬영, GNDVI만). 경계 폴더 없음 → footprint 자동 감지 사용 예정.
+  - 세팅 확정(3차 수정): **전 필지 XAG**(격자 5m 강제), **비율 모드 900평당 2포(40kg)** = 14컬럼 스키마 `rate_kg=40, rate_area=900, area_unit=평`, `total` 공란(비율 모드가 우선), spread 1, rice, masking 0.5, height/width 3/5(형식 통일용, XAG 미사용). ※ 중간에 사용자가 gj 형식 절대량(20kg 기준)으로 바꿨다가, "코드가 비율로 설계되어 있으니 비율로" + 기준을 1포→**2포**로 변경 요청하여 최종 비율 모드로 확정.
+  - `field_area`는 footprint 실측(평): GRR1 669 / GRR2 446 / GRR3 1398 / GRR4 1092 / GRR5 741 / GRR6 821 / GRR7 1238 / GRR8 1265 / GRR9 939 / GRR10 684 / GRR11 926 / GRR12 786. 경계 zip 없음 → 실행 시에도 footprint 사용. 기준·면적 변경 시 CSV 숫자만 바꾸면 총량 자동 재계산됨(비율 모드 장점).
+  - 검증: 12필지 매칭 완전, `[비율계산]` 로그로 total=40×면적/900 전 필지 검산 통과 — 19.8(GRR2)~62.1(GRR3)kg, 합 489.2kg≈24.5포. 소필지(80~110평) 없어 XAG 5m 처방 실패 위험 없음(최소 GRR2 446평).
 
 - **2026-07-31 GJ 3차분 7필지 처방 생성 (`result/gj_0731`) + 이미지 그리드 표기**:
   - 입력: `data/gj_data` 3차 촬영분(260724/260729), 경계 전부 `gj_boundary` zip 사용(footprint 미사용). CSV(`gj_vra.csv`)는 격자 크기 비교 실험 세팅 — GJR2(20kg/10m), GJR3(40kg/5m), GJR4(40kg/10m), GJR5(30kg/5m), GJR6(30kg/10m), GJR15·16(60kg/1m). GJR1·GJR11은 CSV 제외(생성된 참고 PNG는 폴더에서 정리).

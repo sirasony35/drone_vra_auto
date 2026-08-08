@@ -50,10 +50,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/gj_data"
-BOUNDARY_FOLDER = "data/gj_boundary"
-OUTPUT_FOLDER = "result/gj_0731"
-VRA_CSV_PATH = "vra_setting/gj_vra.csv"
+DATA_FOLDER = "data/gr_data"
+BOUNDARY_FOLDER = "data/gr_boundary"
+OUTPUT_FOLDER = "result/gr_0805"
+VRA_CSV_PATH = "vra_setting/gr_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
