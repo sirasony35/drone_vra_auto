@@ -1,0 +1,30 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+
+    // PyCharm에서 쓰던 conda 가상환경(python312)과 동일한 인터프리터
+    "python.defaultInterpreterPath": "C:\\Users\\Sangho\\anaconda3\\envs\\python312\\python.exe",
+    "python.terminal.activateEnvironment": true,
+
+    // 한글 로그/파일명 깨짐 방지 (memory.md 기록)
+    "terminal.integrated.env.windows": {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1"
+    },
+    "files.encoding": "utf8",
+    "files.eol": "\r\n",
+
+    // 대용량 산출물·캐시는 탐색기/검색에서 제외 (열기 속도)
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.idea": true
+    },
+    "search.exclude": {
+        "**/__pycache__": true,
+        "data/**": true,
+        "result/**": true,
+        "dist/**": true,
+        "webapp/jobs/**": true,
+        "verification_reports/**": true
+    }
+}

@@ -1,0 +1,71 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "VRA 처방 생성 (operation_main.py)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/operation_main.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1"
+            }
+        },
+        {
+            "name": "웹앱 실행 (webapp/app.py, 127.0.0.1:8000)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/webapp/app.py",
+            "cwd": "${workspaceFolder}/webapp",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1"
+            }
+        },
+        {
+            "name": "웹앱 실행 (브라우저 자동열림 없이)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/webapp/app.py",
+            "cwd": "${workspaceFolder}/webapp",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
+                "VRA_NO_BROWSER": "1"
+            }
+        },
+        {
+            "name": "Pix4D 비교 검증 (verification_tool.py)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/verification_tool.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1"
+            }
+        },
+        {
+            "name": "현재 열린 파일 실행",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1"
+            }
+        }
+    ]
+}

@@ -52,7 +52,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 DATA_FOLDER = "data/gr_data"
 BOUNDARY_FOLDER = "data/gr_boundary"
-OUTPUT_FOLDER = "result/gr_0805"
+OUTPUT_FOLDER = "result/gr_0811_dji"
 VRA_CSV_PATH = "vra_setting/gr_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
