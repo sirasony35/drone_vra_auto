@@ -1,3 +1,8 @@
 field,total,spread,crop,grid_size,sigma,masking,height,width,drone_type
-GJR1,60,1.2,rice,1,,0.5,3,5,DJI
-GJR11,60,0,rice,1,,0.5,3,5,DJI
+GJR2,20,1,rice,10,,0.5,3,5,DJI
+GJR3,40,1,rice,5,,0.5,3,5,DJI
+GJR4,40,1,rice,10,,0.5,3,5,DJI
+GJR5,30,1,rice,5,,0.5,3,5,DJI
+GJR6,30,1,rice,10,,0.5,3,5,DJI
+GJR15,60,1,rice,1,,0.5,3,5,DJI
+GJR16,60,1,rice,1,,0.5,3,5,DJI

@@ -16,43 +16,53 @@
 
 # 폴더/파일 구조
 
+아래는 **집 PC(`D:\회사관련\drone_vra_auto`) 기준 2026-08-10 실측** 구조다. 지역별 설정 CSV·입력 데이터는 PC마다 다르게 쌓여 있으므로(회사 PC엔 icheon/namhae/okcheon/dangjin/hs 등이 있음, git 미추적), 아래는 "이 PC에 있는 것"으로 읽을 것.
+
 ```
 drone_vra_auto/
 ├── operation_main.py          # 메인 실행 스크립트 (전체 VRA 파이프라인)
 ├── boundary_detector.py       # 필지 경계 추출 모듈 (BoundaryDetector 클래스)
 ├── vra_calculator.py          # VRA 처방량 계산 모듈 (VRACalculator 클래스)
 ├── verification_tool.py       # 파이썬 결과 vs Pix4D 결과 비교/검증 도구
+├── requirements.txt           # 검증 버전 고정 (geopandas 1.1.1, rasterio 1.4.3, flask 3.1.3 …)
+├── 배포안내.md                 # 새 PC 설치 절차(exe 배포 / conda env 두 방법)
+├── 처방맵_웹앱_실행.bat         # 로컬 웹앱 실행 (127.0.0.1:8000)
+├── 처방맵_외부공개_실행.bat      # 웹앱 + Cloudflare Tunnel(trycloudflare 주소 발급)
 │
-├── vra_setting/               # 필지별 VRA 설정 CSV (코드 없음, 데이터만 존재)
-│   ├── gj_vra.csv             # 광주/김제(GJR…) 벼 필지
-│   ├── hs_vra.csv             # 화성(HSR…) — 지역별 진행분
-│   ├── hs_service_vra.csv     # 화성 서비스(주소형 필지코드)
-│   ├── icheon_vra.csv         # 경기 이천(주소형, 경작자 컬럼 포함)
-│   ├── namhae_vra.csv         # 경남 남해(주소형)
-│   ├── okcheon_vra.csv        # 충북 옥천(주소형)
-│   ├── dangjin_vra.csv        # 충남 당진(주소형)
-│   ├── gj_webapp_vra.csv, sm_vra.csv, bd_vra.csv  # 기타/구형
-│   └── 이천필지.xlsx           # 이천 원본 대장(경작자·주소·비료량) — 매칭 소스
+├── webapp/
+│   ├── app.py                 # Flask 웹앱(분할 업로드 /chunk·/finalize, /status·/download·/preview)
+│   ├── cloudflared.exe        # 52MB, 터널 실행용 (git 미추적)
+│   └── jobs/                  # 작업별 폴더 <타임스탬프>/ (산출물, git 미추적)
 │
-├── data/                      # 입력 데이터
-│   ├── sm_data/               # SM 필지 GNDVI / RGB GeoTIFF 입력 영상
-│   └── ShapeFile/             # SM01~SM24 필지 경계 ShapeFile(.shp/.dbf/.shx/.prj …)
+├── dist/                      # PyInstaller 산출물 (git 미추적)
+│   ├── VRA_Webapp/            # onedir 빌드 (VRA_Webapp.exe + _internal) — **2026-07-27 빌드**
+│   └── VRA_Webapp_20260727.zip  # 배포용 zip 170MB — 0731 코드 변경 미반영(재빌드 필요)
 │
-├── result/                    # 출력 결과 (실행 산출물)
-│   ├── sm_result_dji_0330/    # SM 필지 DJI 결과 (DJI/Rx, DJI/ShapeFile, *_VRA.csv, *_Result.png)
-│   ├── sm_fields/             # SM 필지 결과 (DJI Rx/ShapeFile, DJI.zip)
-│   └── pix4d_data/            # Pix4D로 생성한 비교용 결과 (검증 도구 입력)
-│       ├── bd/ , gj/          # 필지군별 Pix4D Rx/ShapeFile 및 비교 이미지
+├── vra_setting/               # 필지별 VRA 설정 CSV (이 PC에 남아 있는 것만)
+│   ├── gr_vra.csv             # GR 12필지, XAG, 14컬럼 스키마 (최신 작업)
+│   ├── gj_vra.csv             # 광주/김제(GJR…) — 격자 크기 비교 실험 세팅, 10컬럼
+│   └── bd_vra.csv             # 구형 7컬럼
+│
+├── data/                      # 입력 데이터 (git: ShapeFile만 추적, 나머지 미추적)
+│   ├── gr_data/               # GRR1~12 `*_01_260803_GNDVI.tif` (최신)
+│   ├── gr_boundary/           # **빈 폴더** — footprint 자동 감지용
+│   ├── gj_data/, gj_boundary/(+.zip)  # 광주 GJR 영상·경계 zip
+│   ├── sm_data/               # SM 필지 GNDVI / RGB GeoTIFF
+│   └── ShapeFile/             # SM01~SM24 필지 경계 ShapeFile
+│
+├── result/                    # 출력 결과 (실행 산출물, git 미추적)
+│   ├── gr_0805/               # 최신 — XAG/(kml+json 12쌍), *_VRA.csv, *_Result.png, 처방요약.xlsx
+│   ├── gj_0731/, gj_0727_v2/, gj_result_0705/, web_app_result/
+│   └── pix4d_data/            # Pix4D 비교용 결과 (검증 도구 입력) — bd/, gj/, GJR5_XAG 등
 │
 ├── verification_reports/      # verification_tool.py 출력 비교 리포트 (Report_*.png)
-│
 ├── pix4d_자동화 비교.pptx      # 자동화 vs Pix4D 비교 발표자료 (참고용, 코드 무관)
-│
-├── __pycache__/               # 파이썬 캐시 (.pyc) — git 무시 권장
-└── .idea/                     # PyCharm 프로젝트 설정 — git 무시 권장
+├── __pycache__/ , .idea/      # 캐시·IDE 설정 (미추적, .gitignore 부재로 status에 계속 뜸)
 ```
 
-> 참고: `operation_main.py`의 경로 상수(`DATA_FOLDER`, `BOUNDARY_FOLDER`, `OUTPUT_FOLDER`, `VRA_CSV_PATH`)는 실행하는 작업마다 코드 상단에서 직접 수정하여 사용한다. 마지막 실행 흔적으로 남아있을 뿐 지역마다 바꿔야 한다(예: `data/당진`, `result/dangjin_0727`, `vra_setting/dangjin_vra.csv`). 경계 파일이 없는 지역은 `BOUNDARY_FOLDER`를 빈 폴더로 두면 `BOUNDARY_METHOD='footprint'`로 자동 감지된다.
+> 참고: `operation_main.py`의 경로 상수(`DATA_FOLDER`, `BOUNDARY_FOLDER`, `OUTPUT_FOLDER`, `VRA_CSV_PATH`)는 실행하는 작업마다 코드 상단에서 직접 수정하여 사용한다. 마지막 실행 흔적으로 남아있을 뿐 지역마다 바꿔야 한다(현재 값 = `data/gr_data`, `data/gr_boundary`, `result/gr_0805`, `vra_setting/gr_vra.csv`). 경계 파일이 없는 지역은 `BOUNDARY_FOLDER`를 빈 폴더로 두면 `BOUNDARY_METHOD='footprint'`로 자동 감지된다.
+
+> **git 추적 범위**(2026-08-10 확인): 코드 5개(.py) + `memory.md` + `requirements.txt` + `배포안내.md` + bat 2개 + `vra_setting/{bd,gj}_vra.csv` + `data/ShapeFile/SM01~12`. `gr_vra.csv`·webapp/cloudflared·dist·data·result은 미추적. **`.gitignore` 파일이 이 PC에 없다**(2026-07-07 회사 PC에서 만들었다는 기록이 있으나 커밋되지 않음) → `git status`가 대용량 미추적 파일로 가득 참. `빌드_exe.bat`도 이 PC에 없음(회사 PC 전용).
 
 ---
 
@@ -163,7 +173,7 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **scikit-learn** (`sklearn.metrics`) — 검증 도구의 accuracy, Cohen's Kappa (verification_tool.py 전용)
 - **matplotlib** — 결과 지도 및 리포트 이미지 시각화
 
-> `requirements.txt`는 현재 없음. git 공유 시 위 패키지 목록으로 작성해두면 좋다. 좌표계는 한국 측지계 EPSG:5179(분석)와 WGS84 EPSG:4326(출력)을 사용하므로 GDAL/PROJ가 포함된 환경(예: conda) 권장.
+> `requirements.txt` **존재함**(2026-07-05 작성, 커밋됨) — 검증 버전 고정: geopandas 1.1.1 / rasterio 1.4.3 / shapely 2.1.1 / numpy 2.4.2 / pandas 3.0.1 / scipy 1.16.2 / scikit-image 0.26.0 / scikit-learn 1.7.2 / matplotlib 3.10.6 / flask 3.1.3. 좌표계는 한국 측지계 EPSG:5179(분석)와 WGS84 EPSG:4326(출력)을 사용하므로 GDAL/PROJ가 포함된 환경(예: conda) 권장.
 
 ---
 
@@ -174,7 +184,7 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 - **기체별 동작 차이**: CSV의 `drone_type` 열로 DJI/XAG를 구분한다. 열이 없으면 DJI(기본). XAG는 3등급·격자 5m 강제 고정·JSON/KML 출력, DJI는 5등급·CSV 격자값·GeoTIFF/ShapeFile 출력.
 - **VRA 설정 CSV 컬럼**: `field, total, spread, crop, grid_size, sigma, masking`이 기본이며, 코드는 추가로 `drone_type, height, width`도 참조한다(`vra_calculator.py`, `operation_main.py`). 2026-07-05부터 `vra.csv`/`gj_vra.csv`는 10컬럼(`height,width,drone_type` 포함) 체계 — `drone_type`은 DJI/XAG 분기(미기재 시 DJI), `height`/`width`는 비행고도/살포폭으로 경계 shp DBF와 파일명에 반영. `sm_vra.csv`/`bd_vra.csv`는 아직 기본 7컬럼. `sigma`가 비어 있으면 자동 계산, `masking`은 나지 마스킹 강도(relax_factor)로 쓰인다.
 - **균등 처방 VRA.csv 단일행 통합 (2026-07-27)**: spread=0 등 살포구역 kg/ha가 전부 동일하면, VRA.csv에서 5개 등급이 같은 값으로 나열돼 변량처럼 보이던 혼동 제거. `consolidate_uniform_vra()`가 살포구역을 단일 `균등(Uniform)` 행(면적·총량 합산, GNDVI 면적가중평균)으로 합치고 나지(Zone6)만 0 유지. **CSV 표시 전용 — Rx GeoTIFF/PNG는 원본 vra_df로 생성돼 영향 없음**(전 구역 균일값 그대로). 변량(rate 상이)이면 미적용. exe 재빌드 `dist\VRA_Webapp_20260727.zip`. GJR11(균등)·GJR1(변량) 및 exe E2E 검증.
-- **확인용 이미지(Result.png)에 총면적/총비료량 표시 (2026-07-27)**: `save_map_image`에 `info_text` 파라미터 추가 — 제목 아래 별도 줄로 `총 O평 | 비료 O kg (O포)` 표기(면적=필지면적 평, 비료=처방 총량). main()에서 `img_info` 구성해 전달(vra_df None이면 빈 문자열). 제목 폰트 15→11·pad=22로 겹침 해소, 정보는 fontsize 10·bold·남색. exe 재빌드 `dist\VRA_Webapp_20260727.zip`. 옥천 21필지 재생성으로 검증.
+- **확인용 이미지(Result.png)에 총면적/총비료량 표시 (2026-07-27, 2026-07-31 그리드 추가)**: `save_map_image`에 `info_text` 파라미터 추가 — 제목 아래 별도 줄로 `총 O평 | 비료 O kg (O포) | 그리드 Om` 표기(면적=필지면적 평, 비료=처방 총량, 그리드=`current_grid_size:g`). main()에서 `img_info` 구성해 전달(vra_df None이면 빈 문자열). 제목 폰트 15→11·pad=22로 겹침 해소, 정보는 fontsize 10·bold·남색. exe 재빌드 `dist\VRA_Webapp_20260727.zip`. 옥천 21필지 재생성으로 검증.
 - **처방요약.xlsx 컬럼 확장 (2026-07-23)**: `경작자`(vra.csv에 경작자 컬럼 있으면 자동), `비료기준`(처음 세팅 표기 — 면적비율 '400평에 20kg' / 절대 '60kg (절대)') 2개 추가. `_field_str`·`_fert_setting_label` 헬퍼. exe 재빌드 `dist\VRA_Webapp_20260723.zip`. 이천 46필지 icheon_0723 재생성으로 검증. 최종 컬럼: 필지·경작자·기체·계산방식·비료기준·총비료량·포대수·필요포대수·필지면적·살포면적(평/ha)·평균살포량.
 - **전체 처방 요약 엑셀 출력 (2026-07-20 추가, `operation_main.save_run_summary`)**: 한 번 실행한 전체 필지를 한 파일로. OUTPUT_FOLDER 최상위에 `처방요약.xlsx`(openpyxl, 실패 시 `처방요약.csv` utf-8-sig 폴백). 컬럼: 필지, 기체, 계산방식(면적비율/절대량), 총비료량(kg), 포대수(20kg), 필요포대수(올림), 필지면적(평), 살포면적(평), 살포면적(ha), 평균살포량(kg/ha). 1포대=20kg 상수(`BAG_KG`), 1평=3.3057851㎡(`PYEONG_M2`). main() 루프에서 필지별 1행 집계 후 루프 종료 시 저장. 웹앱 zip에 자동 포함. **exe 빌드에 `--collect-submodules openpyxl` 추가 필수**(없으면 xlsx 실패→csv 폴백). exe E2E 검증 통과.
 - **비료량 입력 방식 2종 (2026-07-20 추가, `vra_calculator._resolve_total_kg`)**: 농가별 비료 기준 대응.
@@ -200,11 +210,57 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 ## Windows 콘솔/파일 주의
 - CSV·요약을 Excel에서 **열어둔 채** 저장 요청하면 `PermissionError`(파일 잠금) — 닫아야 기록됨. 측정값은 json 캐시 후 잠금 풀리면 기록하는 패턴 사용.
+- **사용자용 CSV는 CRLF + UTF-8 BOM(utf-8-sig)으로 저장할 것** (2026-08-05 확인): LF-only로 저장하면 사용자 환경(메모장/엑셀)에서 행이 한 줄로 붙어 보임("행이 이상하다"). 한글 컬럼값(평 등)은 BOM 없으면 엑셀에서 깨짐. `VRACalculator`는 utf-8-sig 우선 시도라 호환.
 - 스크립트 실행 시 `$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"`.
 
 ---
 
+# 남은 할 일 (2026-08-10 기준, 사용자 지시 시 진행)
+
+1. **exe 재빌드·재배포**: 현 dist는 0727 빌드 — 0731 코드(Result.png 그리드 표기) 미반영. 회사 PC `빌드_exe.bat`로 재빌드 후 `dist\VRA_Webapp_<날짜>.zip` 갱신.
+2. **`.gitignore` 커밋**: 이 PC에 파일이 없어 `git status`가 data/result/__pycache__/.idea 미추적 파일로 뒤덮임. 권장 항목 — `__pycache__/ .idea/ data/ result/ dist/ build/ *.spec webapp/jobs/ webapp/cloudflared.exe verification_reports/`.
+3. **Cloudflare Tunnel 외부 공개 실행**: 구현·터널 경유 E2E 검증까지 끝났고, 남은 건 회사 PC에서 `처방맵_외부공개_실행.bat` 실행 → trycloudflare 주소 공유뿐. 주소 고정·접근 제한이 필요해지면 이름 있는 터널 + Cloudflare Access로 전환.
+4. (선택) `gr_vra.csv`를 git에 포함할지 결정 — 현재 미추적이라 회사 PC와 동기화 안 됨.
+
+---
+
 # 변경 이력
+
+- **2026-08-11 GR 12필지 DJI 재처방 (`result/gr_0811_dji`) — XAG와 동일 조건 비교**:
+  - 사용자 요청으로 `gr_vra.csv`를 **XAG → DJI**로 변경(`drone_type=DJI`, `grid_size 5 → 1`). 비료 세팅은 08-05와 동일 유지(GRR1·2·10 절대 20kg / 나머지 9필지 900평당 40kg). **XAG 원본은 `vra_setting/gr_vra_xag.csv`로 백업**해 둠(되돌리려면 이 파일을 gr_vra.csv로 복사).
+  - 12필지 전부 성공. 산출물: `DJI/Rx/`(tif+tfw 각 12), `DJI/ShapeFile/`(12세트), `*_VRA.csv` 12, `*_Result.png` 12, `처방요약.xlsx`. 무결성 검증 — Rx 전량 EPSG:4326·nodata=None·5등급(GRR6만 4등급, 스무딩으로 한 등급 소멸), DBF `height=3/line_space=5/name` 정상, PNG 한글·정보줄(`총 O평 | 비료 Okg (O포) | 그리드 1m`) 정상.
+  - **총량은 XAG와 완전 동일(양쪽 469.13kg)** — 비율/절대 계산은 격자·기체와 무관하게 목표 총량을 맞추므로 당연한 결과.
+  - **핵심 차이 = 살포 커버리지**: 평균 **83.4%(XAG 5m) → 95.6%(DJI 1m)**. 08-05에 지적한 손실 필지가 특히 개선 — GRR2 67.9→93.4%, GRR12 69.3→96.1%, GRR5 74.5→94.7%, GRR10 76.3→95.2%, GRR7 78.2→96.7%. 총량이 같은데 살포면적이 넓어지므로 **평균살포량(kg/ha)은 그만큼 내려감**(GRR2 199.9→145.3, GRR12 194.1→139.9). 즉 XAG 5m는 같은 비료를 좁은 면적에 농축 살포했던 것 — **좁은/사선형 필지는 DJI 1m 권장**이라는 기존 판단이 수치로 재확인됨.
+  - `operation_main.py`의 `OUTPUT_FOLDER`는 현재 `result/gr_0811_dji`. 08-05 XAG 결과(`result/gr_0805`)는 그대로 보존.
+
+- **2026-08-10 현황 점검 (코드 변경 없음)**: 새 세션에서 폴더·git 전수 확인. 결론 — **코드/데이터 상태는 08-05 기록 그대로이고 추가 작업 없음**.
+  - git: `main` = `bb26cdc "메모리와 메인 함수 수정"`(2026-08-08 커밋, origin/main과 동기). 내용은 08-05에 한 작업(경로 상수 gj→gr 4줄 + memory.md GR 항목 12줄)을 뒤늦게 커밋한 것뿐 — **08-08에 새 작업이 있었던 게 아님**.
+  - `result/gr_0805` 산출물 실측: `XAG/` 24개(12필지×kml+json), `*_VRA.csv` 12, `*_Result.png` 12, `처방요약.xlsx` 1 — 기록과 일치.
+  - `gr_vra.csv` 현물 확인: GRR1·2·10만 `total=20`(절대량, rate 컬럼 공란) / 나머지 9필지 `rate_kg=40,rate_area=900`(비율) — 08-05 기록과 일치. UTF-8 BOM.
+  - **exe가 코드보다 낡음**: `dist/VRA_Webapp*`·zip 모두 2026-07-27 빌드 → 07-31 Result.png 그리드 표기 변경이 exe에 없음. **다음 배포 전 재빌드 필요**(빌드 스크립트 `빌드_exe.bat`는 회사 PC에 있음).
+  - `.gitignore` 부재 확인 — 아래 '남은 할 일' 참조.
+
+- **2026-08-05 GR 처방 생성 완료 (`result/gr_0805`)**:
+  - 실행 직전 사용자 CSV 수정: GRR1·2·10에 `total=20` 기입 — 코드상 비율 모드가 total보다 우선이므로 **해당 3필지의 rate_kg/rate_area를 비워 절대량 20kg 적용**(사용자 의도 해석, 재발 시 동일 처리). 최종: 3필지 절대량 20kg + 9필지 비율(900평당 40kg).
+  - 12필지 전부 XAG(5m/3등급) 성공: KML+Prescription JSON(무결성 검증 — weightData=rows×cols, dosage 정수 g/m², cellSize 5), 총량 정확(합 ~449kg), 처방요약.xlsx 정상.
+  - **XAG 5m 커버리지 주의 재확인**: 좁은/작은 필지에서 살포면적 손실 큼 — GRR2 68%(303/446평, 좁은 사선형), GRR12 69%, GRR5 75%, GRR10 76%. 나머지는 79~96%. 평균살포량이 그만큼 농축됨(GRR2 200kg/ha). XAG 강제 5m 특성이라 구조적 한계 — 좁은 필지는 DJI 1m 권장.
+
+- **2026-08-05 GR(고령?) 신규 지역 세팅 (`vra_setting/gr_vra.csv` 신규, 실행 대기)**:
+  - `data/gr_data` GRR1~12 (260803 촬영, GNDVI만). 경계 폴더 없음 → footprint 자동 감지 사용 예정.
+  - 세팅 확정(3차 수정): **전 필지 XAG**(격자 5m 강제), **비율 모드 900평당 2포(40kg)** = 14컬럼 스키마 `rate_kg=40, rate_area=900, area_unit=평`, `total` 공란(비율 모드가 우선), spread 1, rice, masking 0.5, height/width 3/5(형식 통일용, XAG 미사용). ※ 중간에 사용자가 gj 형식 절대량(20kg 기준)으로 바꿨다가, "코드가 비율로 설계되어 있으니 비율로" + 기준을 1포→**2포**로 변경 요청하여 최종 비율 모드로 확정.
+  - `field_area`는 footprint 실측(평): GRR1 669 / GRR2 446 / GRR3 1398 / GRR4 1092 / GRR5 741 / GRR6 821 / GRR7 1238 / GRR8 1265 / GRR9 939 / GRR10 684 / GRR11 926 / GRR12 786. 경계 zip 없음 → 실행 시에도 footprint 사용. 기준·면적 변경 시 CSV 숫자만 바꾸면 총량 자동 재계산됨(비율 모드 장점).
+  - 검증: 12필지 매칭 완전, `[비율계산]` 로그로 total=40×면적/900 전 필지 검산 통과 — 19.8(GRR2)~62.1(GRR3)kg, 합 489.2kg≈24.5포. 소필지(80~110평) 없어 XAG 5m 처방 실패 위험 없음(최소 GRR2 446평).
+
+- **2026-07-31 GJ 3차분 7필지 처방 생성 (`result/gj_0731`) + 이미지 그리드 표기**:
+  - 입력: `data/gj_data` 3차 촬영분(260724/260729), 경계 전부 `gj_boundary` zip 사용(footprint 미사용). CSV(`gj_vra.csv`)는 격자 크기 비교 실험 세팅 — GJR2(20kg/10m), GJR3(40kg/5m), GJR4(40kg/10m), GJR5(30kg/5m), GJR6(30kg/10m), GJR15·16(60kg/1m). GJR1·GJR11은 CSV 제외(생성된 참고 PNG는 폴더에서 정리).
+  - 결과: 7필지 전부 성공, 총량 목표 ±0.01kg. **10m 격자는 95% overlap 규칙 때문에 살포 커버리지 저하** — GJR4 76%(908/1,193평, 필지 방향과 격자 안 맞음), GJR2 94%, GJR6 96%. 5m는 86~98%, 1m는 96~97%. GJR16 필요포대수 4는 60.01kg 올림 때문(실질 3포).
+  - Result.png 정보줄에 그리드 크기 추가(`... | 그리드 10m`) — `img_info`에 `current_grid_size:g` 연결.
+
+- **2026-07-27 GJ 3차 촬영분 처방 생성 (집 PC, `result/gj_0727_v2`)**:
+  - 입력: `data/gj_data`의 신규 3차 촬영분(260724) GJR1·GJR11 2필지, 경계는 `data/gj_boundary` zip 사용.
+  - 설정(`gj_vra.csv`): GJR1 = total 60·spread 1.1·**grid 5m**, GJR11 = total 60·spread 0(균등)·grid 1m. 둘 다 DJI.
+  - **GJR1의 5m 격자는 의도적 실험** — 같은 필지에서 5m vs 1m 격자가 처방 결과에 얼마나 차이를 만드는지 비교 테스트 목적. 오설정 아님.
+  - 결과: GJR1 변량 5등급 144~166 kg/ha·총 60.00kg·1,212평 / GJR11 균등 159.3 kg/ha 단일행(균등 통합 로직 정상 동작)·총 59.99kg·1,171평. 처방요약.xlsx 포함 전 산출물 정상. Result.png 상단 총면적·비료량 표기 확인.
 
 - **2026-07-21 출력 파일명 짧게(드론 표시용) + XAG Pix4D 구조 재적용**:
   - **짧은 파일명**(`operation_main.short_field_name`): 주소형 필지코드에서 앞쪽 행정구역(도/시/군/구) 토큰 제거 + 뒤 정보(_DJI_1m_H3m_W5m_날짜) 생략. 예: `경기도 화성시 만세구 우정읍 이화리 1409` → 파일명 `우정읍 이화리 1409.tif`. 이유: 드론 화면에서 필지명이 너무 길어 구분 안 됨(앞부분 도·시·구가 전부 공통). 적용: DJI Rx tif/tfw·경계 shp·PNG·VRA.csv, XAG kml/json, shp DBF `name` 속성. `HSR1`/`GJR5` 등 비주소 코드는 그대로. 필지코드 매칭·요약 '필지' 컬럼·VRA Field는 내부적으로 full 유지(추적성). 사용자 확정: 도·시·구 제거 + 뒤 정보 제거.
