@@ -226,6 +226,36 @@ Python 3.12 기준 (`.pyc` 캐시가 cpython-312). 주요 외부 라이브러리
 
 # 변경 이력
 
+- **2026-08-15 결과 이미지 범례에 등급별 살포량(kg/ha) 표기 추가** (`operation_main.save_map_image`):
+  - **사용자 인식 정정**: "예전엔 색상별 살포량이 이미지에 있었는데 사라졌다"는 문의 — git 전 커밋의 `save_map_image`를 전수 확인한 결과 **범례에 kg/ha를 넣은 버전은 한 번도 없었음**(항상 `1(High)`, `2`, … 라벨만). 회귀가 아니라 미구현이었고, VRA.csv의 등급별 Rate 표 또는 2026-07-27 추가된 제목 아래 정보줄과 혼동한 것으로 보임. 요청 취지에 맞춰 신규 구현.
+  - 구현: `save_map_image(..., rate_map=None)` 파라미터 추가 — `rate_map = {등급: (Rate kg/ha, Total kg)}`. 범례 라벨이 **`1(High)   196 kg/ha  |  371.2kg (18.6포)`** 형태(ha당 단가 + 그 등급에 실제 투입되는 총량·포대수 병기), Zone 6은 `6(Skip)   미살포`, 범례 제목은 `등급별 살포량 (ha당 | 실제)`. `main()`에서 `vra_df`의 `Zone`/`Rate(kg/ha)`/`Total(kg)`로 만들어 전달(처방 실패 시 None → 기존 라벨 유지). DJI 5등급·XAG 3등급 모두 대응.
+  - **2단계로 진행됨**: 1차는 kg/ha만 표기 → 사용자가 "실제 살포량도 옆에" 요청해 Total(kg)+포대수 추가. 최종형이 후자.
+  - SM DJI/XAG 결과 전량(24장) 재생성해 반영 확인. 범례의 등급별 Total 합이 전 필지에서 900.0kg과 일치함을 교차검증. **exe에는 아직 미반영(재빌드 필요)**.
+  - 작업 중 `처방요약.xlsx`가 엑셀에 열려 있어 `PermissionError` → CSV 폴백 발생(기존 기록된 Windows 파일 잠금 이슈 재현). 파일 닫은 뒤 재저장으로 해결.
+
+- **2026-08-15 `result/sm_0811_xag` 폴더 소실 → 재생성**: DJI 재실행 사이에 XAG 결과 폴더가 사라져 있었음(사용자가 삭제/이동한 것으로 추정, `result/sm_0811_dji.zip`이 같은 시간대에 생성됨). D:\회사관련 하위 어디에도 없어 범례 기능 포함 버전으로 재생성함(총량 10,800kg·12필지 동일, JSON 무결성 정상). `vra_setting`에 `sm_vra_dji.csv`/`sm_vra_xag.csv` 두 세팅을 모두 백업해 두어 기체 전환 시 복사만 하면 됨.
+
+- **2026-08-11 SM01~SM12 필지코드에 현장 팻말번호 병기 (`SM01(A-12)` … `SM12(A-01)`)**:
+  - **이유**: 필지코드(SM..)와 **현장 팻말(A-..)이 역순**이라 작업자가 혼동. 대조표 = `A번호 = 13 − SM번호` → SM01=A-12, SM02=A-11, … SM12=A-01. 새 필지코드는 **두 표기를 병기한 `SM01(A-12)` 형식**(사용자 지정)이며, 이 문자열이 그대로 처방 파일명·요약 '필지' 컬럼에 나감.
+  - 변경 대상 3종을 모두 맞춤: ① `data/sm_data` GNDVI tif + .aux.xml 24개 파일명(첫 토큰만 교체, `SM01(A-12)_02_260802_150_GNDVI_Crop.tif`), ② `data/ShapeFile` 경계 shp 세트 12개(shp/shx/dbf/prj/cpg) 파일명, ③ **shp 내부 DBF `name` 속성값**(`SM01`→`SM01(A-12)`). geopandas로 재작성했고 지오메트리·나머지 속성(color/creationDa/fill/visualType)·컬럼 순서 원본과 동일함을 대조 검증.
+  - **원본 백업**: `data/ShapeFile_SM01-12_backup_orig/`(60개). git에도 구 파일명이 남아 있음(SM01~12은 추적 대상).
+  - 괄호·하이픈 포함 코드라도 파이프라인 매칭 정상 — 필지코드 추출은 `split('_')[0]`이라 `(A-12)`가 코드에 포함되고, `*_GNDVI*.tif` glob·`{code}.shp` 경계 탐색 모두 12/12 매칭 확인.
+  - `vra_setting/sm_vra.csv` **신규 생성**(14컬럼, UTF-8 BOM+CRLF): 새 코드 12행 + 경계 실측 `field_area`(평) — SM01(A-12) 9,097 / SM02~SM11 17,272~17,757 / SM12(A-01) 14,560, 합계 약 197,839평(65.4ha).
+
+- **2026-08-11 SM 12필지 처방 생성 (`result/sm_0811_dji`, DJI 5m·필지당 45포)**:
+  - 세팅(사용자 확정): 전 필지 **DJI·격자 5m·절대량 `total=900`kg(45포×20kg)**, spread 1, rice, masking 0.5, height/width 3/5. 목표 합계 10,800kg=540포.
+  - 12필지 전량 성공, 총량 900.00±0.01kg 정확. 산출물 Rx tif 12·tfw 12·경계 shp 12·VRA.csv 12·Result.png 12·처방요약.xlsx. Rx 전량 EPSG:4326·nodata=None. PNG 제목·파일명에 `SM12(A-01)` 형태로 팻말번호 표시됨(작업자 혼동 방지 목적 달성).
+  - **커버리지 92.5~95.4%(평균 93.5%)** — 5m 격자 + 95% overlap 규칙의 구조적 손실로, 2026-07-05 SM 분석(92.5~95.4%)과 동일. 1m로 낮추면 손실 1.2% 수준이나 필지가 5.7ha라 격자 수가 급증.
+  - **면적 대비 살포량 불균형 주의(사용자에게 고지함)**: 절대량 45포 균일 적용이라 면적이 작은 필지가 농축됨 — SM01(A-12) 9,097평 **319kg/ha**, SM12(A-01) 14,560평 196kg/ha, 나머지 10필지 164~169kg/ha. 균일하게 하려면 면적비율 모드(`rate_kg`/`rate_area`) 전환 필요.
+  - **필요포대수 46 표기 주의**: 총량이 900.01kg로 떨어진 필지는 올림 때문에 46포로 나옴(실질 45포). 기존 GJR16 사례와 동일한 표시 특성.
+
+- **2026-08-11 SM 12필지 XAG 처방 추가 생성 (`result/sm_0811_xag`, 동일 900kg)**:
+  - `sm_vra.csv`의 `drone_type`만 DJI→XAG(총량·격자 5m 동일). **DJI 세팅은 `vra_setting/sm_vra_dji.csv`로 백업**.
+  - 12필지 전량 성공. 산출물 KML 12 + Prescription JSON 12 + VRA.csv 12 + Result.png 12 + 처방요약.xlsx. 무결성 — `weightData` 길이=rows×columns, cellSize=5, dosage 정수, KML은 Folder 래퍼 없이 Document 직하 Placemark 1개(Pix4D 구조 유지, 2026-07-21 회귀 재발 없음), `name`에 팻말코드 `SM12(A-01)` 반영.
+  - **DJI와 요약 수치(총량·면적·커버리지·평균살포량)가 완전히 동일** — SM은 어차피 5m 격자였고 격자·경계·총량이 같기 때문. **실질 차이는 등급 수(DJI 5등급 vs XAG 3등급)와 출력 형식(Rx GeoTIFF vs JSON/KML)뿐**.
+  - **XAG dosage 정수화로 인한 실제 살포량 편차 실측**: `dosage=int(round(kg/ha÷10))` g/m²라 필지별 -6.6~+18.6kg 오차, **합계 10,869kg으로 목표 10,800kg 대비 +0.6%(+69kg≒3.5포)**. 필지 규모가 클수록 절대 오차가 커지는 구조(대규모 SM에서 처음 정량 확인). 정밀 총량이 필요하면 DJI(Rx는 float 유지) 권장.
+  - **JSON 구조 주의(오독 방지)**: `weightData`는 **등급 배열(0/1/2/3)**, 실제 살포량은 `dataTypeLevel`의 `{dosage, level}`에 g/m² 정수로 들어감. weightData 값만 보고 살포량으로 오해하지 말 것.
+
 - **2026-08-11 GR 12필지 DJI 재처방 (`result/gr_0811_dji`) — XAG와 동일 조건 비교**:
   - 사용자 요청으로 `gr_vra.csv`를 **XAG → DJI**로 변경(`drone_type=DJI`, `grid_size 5 → 1`). 비료 세팅은 08-05와 동일 유지(GRR1·2·10 절대 20kg / 나머지 9필지 900평당 40kg). **XAG 원본은 `vra_setting/gr_vra_xag.csv`로 백업**해 둠(되돌리려면 이 파일을 gr_vra.csv로 복사).
   - 12필지 전부 성공. 산출물: `DJI/Rx/`(tif+tfw 각 12), `DJI/ShapeFile/`(12세트), `*_VRA.csv` 12, `*_Result.png` 12, `처방요약.xlsx`. 무결성 검증 — Rx 전량 EPSG:4326·nodata=None·5등급(GRR6만 4등급, 스무딩으로 한 등급 소멸), DBF `height=3/line_space=5/name` 정상, PNG 한글·정보줄(`총 O평 | 비료 Okg (O포) | 그리드 1m`) 정상.

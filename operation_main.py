@@ -50,10 +50,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/gr_data"
-BOUNDARY_FOLDER = "data/gr_boundary"
-OUTPUT_FOLDER = "result/gr_0811_dji"
-VRA_CSV_PATH = "vra_setting/gr_vra.csv"
+DATA_FOLDER = "data/sm_data"
+BOUNDARY_FOLDER = "data/ShapeFile"
+OUTPUT_FOLDER = "result/sm_0811_dji"
+VRA_CSV_PATH = "vra_setting/sm_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
@@ -257,15 +257,34 @@ def apply_categorical_zone_smoothing(grid_gdf, zone_col='Raw_Zone', sigma=1.0, f
 
 
 def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_gdf=None, max_zone=5,
-                   info_text=""):
+                   info_text="", rate_map=None):
     if max_zone == 3:
         colors = ['#FF0000', '#FFFF00', '#008000', '#808080']
         labels = ["1(High)", "2(Medium)", "3(Low)", "6(Skip)"]
+        zone_ids = [1, 2, 3, 6]
         vmin, vmax = 1, 6
     else:
         colors = ['#FF0000', '#FFA500', '#FFFF00', '#90EE90', '#008000', '#808080']
         labels = ["1(High)", "2", "3", "4", "5(Low)", "6(Skip)"]
+        zone_ids = [1, 2, 3, 4, 5, 6]
         vmin, vmax = 1, 6
+
+    # 범례에 등급별 살포량 병기 — 현장에서 색만 보고 'ha당 몇 kg / 실제 몇 kg'을 확인할 수 있도록
+    # rate_map = {등급: (Rate kg/ha, 그 등급에 실제 투입되는 Total kg)}
+    legend_title = "Levels"
+    if rate_map:
+        legend_title = "등급별 살포량 (ha당 | 실제)"
+        labeled = []
+        for zid, lab in zip(zone_ids, labels):
+            val = rate_map.get(zid)
+            if zid == 6:
+                labeled.append(f"{lab}   미살포")
+            elif val is not None:
+                rate, total_kg = val
+                labeled.append(f"{lab}   {rate:,.0f} kg/ha  |  {total_kg:,.1f}kg ({total_kg / BAG_KG:.1f}포)")
+            else:
+                labeled.append(lab)
+        labels = labeled
 
     cmap = ListedColormap(colors)
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
@@ -280,7 +299,7 @@ def save_map_image(gdf, output_path, title_suffix="", zone_col='Zone', boundary_
         boundary_gdf.boundary.plot(ax=ax, color='cyan', linewidth=1, alpha=0.7)
 
     legend_patches = [mpatches.Patch(color=c, label=l) for c, l in zip(colors, labels)]
-    ax.legend(handles=legend_patches, loc='lower right', title="Levels")
+    ax.legend(handles=legend_patches, loc='lower right', title=legend_title)
     # 제목: 폰트 축소 + 상단 여백 확보(정보 줄과 겹치지 않도록)
     ax.set_title(f"Zonation Map {title_suffix}", fontsize=11, pad=22)
     # 확인용 정보(총 면적/총 비료량)를 제목 바로 아래 별도 줄로 배치
@@ -764,7 +783,15 @@ def main():
             f_width = float(field_info.get('width', 0)) if field_info is not None else 0
 
             img_info = ""   # 확인용 이미지에 표시할 '총 O평 / 비료 O kg' 텍스트
+            img_rates = None   # 확인용 이미지 범례용 {등급: (kg/ha, 실제 투입 kg)}
             if vra_df is not None:
+                img_rates = {}
+                for _, _r in vra_df.iterrows():
+                    try:
+                        img_rates[int(str(_r['Zone']).split('(')[0])] = (
+                            float(_r['Rate(kg/ha)']), float(_r['Total(kg)']))
+                    except Exception:
+                        continue
                 if drone_type == 'XAG':
                     save_xag_files_wgs84(grid, vra_df, boundary, field_code, grid_size=current_grid_size)
                 else:
@@ -805,7 +832,7 @@ def main():
             save_map_image(grid, os.path.join(OUTPUT_FOLDER, out_img_name),
                            f"Result: {short_field_name(field_code)} ({drone_type})",
                            zone_col='Zone', boundary_gdf=boundary, max_zone=current_n_zones,
-                           info_text=img_info)
+                           info_text=img_info, rate_map=img_rates)
 
             mem_raster.close()
             print("  - Processing Complete.")
