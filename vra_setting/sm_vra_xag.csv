@@ -1,0 +1,13 @@
+﻿field,total,spread,crop,grid_size,sigma,masking,height,width,drone_type,rate_kg,rate_area,field_area,area_unit
+SM01(A-12),900,1,rice,5,,0.5,3,5,XAG,,,9097,평
+SM02(A-11),900,1,rice,5,,0.5,3,5,XAG,,,17348,평
+SM03(A-10),900,1,rice,5,,0.5,3,5,XAG,,,17297,평
+SM04(A-09),900,1,rice,5,,0.5,3,5,XAG,,,17409,평
+SM05(A-08),900,1,rice,5,,0.5,3,5,XAG,,,17472,평
+SM06(A-07),900,1,rice,5,,0.5,3,5,XAG,,,17283,평
+SM07(A-06),900,1,rice,5,,0.5,3,5,XAG,,,17373,평
+SM08(A-05),900,1,rice,5,,0.5,3,5,XAG,,,17272,평
+SM09(A-04),900,1,rice,5,,0.5,3,5,XAG,,,17514,평
+SM10(A-03),900,1,rice,5,,0.5,3,5,XAG,,,17457,평
+SM11(A-02),900,1,rice,5,,0.5,3,5,XAG,,,17757,평
+SM12(A-01),900,1,rice,5,,0.5,3,5,XAG,,,14560,평

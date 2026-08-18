@@ -1,0 +1,13 @@
+﻿field,total,spread,crop,grid_size,sigma,masking,height,width,drone_type,rate_kg,rate_area,field_area,area_unit
+GRR1,20,1,rice,1,,0.5,3,5,DJI,,,669,평
+GRR2,20,1,rice,1,,0.5,3,5,DJI,,,446,평
+GRR3,,1,rice,1,,0.5,3,5,DJI,40,900,1398,평
+GRR4,,1,rice,1,,0.5,3,5,DJI,40,900,1092,평
+GRR5,,1,rice,1,,0.5,3,5,DJI,40,900,741,평
+GRR6,,1,rice,1,,0.5,3,5,DJI,40,900,821,평
+GRR7,,1,rice,1,,0.5,3,5,DJI,40,900,1238,평
+GRR8,,1,rice,1,,0.5,3,5,DJI,40,900,1265,평
+GRR9,,1,rice,1,,0.5,3,5,DJI,40,900,939,평
+GRR10,20,1,rice,1,,0.5,3,5,DJI,,,684,평
+GRR11,,1,rice,1,,0.5,3,5,DJI,40,900,926,평
+GRR12,,1,rice,1,,0.5,3,5,DJI,40,900,786,평
