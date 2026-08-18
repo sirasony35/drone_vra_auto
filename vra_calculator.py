@@ -97,17 +97,27 @@ class VRACalculator:
                 area_in_unit = field_area_m2 / m2_per_unit
                 src = "실측"
 
-            total = rate_kg * (area_in_unit / rate_area)
+            target = rate_kg * (area_in_unit / rate_area)
             print(f"    [비율계산] {rate_kg:g}kg / {rate_area:g}{unit_raw} × 필지 {area_in_unit:.1f}{unit_raw}({src}) "
-                  f"= 목표 총량 {total:.2f}kg")
-            return total
+                  f"= 목표 총량 {target:.2f}kg")
+        else:
+            # 절대량 모드
+            target = self._num(field_info, 'total')
+            if target is None:
+                print(f"    [Warning] '{field_code}': total(절대량)도 rate_kg/rate_area(비율)도 없어 총량을 정할 수 없습니다.")
+                return None
 
-        # 절대량 모드
-        total = self._num(field_info, 'total')
-        if total is None:
-            print(f"    [Warning] '{field_code}': total(절대량)도 rate_kg/rate_area(비율)도 없어 총량을 정할 수 없습니다.")
-            return None
-        return total
+        # 살포 보정계수(overage_factor): 위성 등 저해상도·대규모 필지에서 드론이 처방보다
+        # 더 살포하는(가장자리 커버리지 부족 + 살포 overhead) 현상을 보정한다.
+        #   Rx 처방 총량 = 목표 ÷ 보정계수  → 드론이 ×배율로 과살포해도 실제가 목표에 수렴.
+        # 드론·소규모 필지는 컬럼이 없거나 1.0이면 보정 없음(하위호환).
+        factor = self._num(field_info, 'overage_factor')
+        if factor is not None and factor > 0 and abs(factor - 1.0) > 1e-9:
+            rx_total = target / factor
+            print(f"    [보정계수] overage_factor={factor:g} → 목표 {target:.1f}kg ÷ {factor:g} "
+                  f"= Rx 처방 {rx_total:.1f}kg (드론 실제 살포 ≈ 목표 {target:.1f}kg)")
+            return rx_total
+        return target
 
     def calculate_prescription(self, field_code, zone_stats, field_area_m2=None):
         """

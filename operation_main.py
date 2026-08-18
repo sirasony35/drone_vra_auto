@@ -805,24 +805,40 @@ def main():
                     os.path.join(OUTPUT_FOLDER, vra_out_name), index=False, encoding='euc-kr')
 
                 # 전체 요약(엑셀)용 1행 집계
-                total_kg = float(vra_df['Total(kg)'].sum())
+                rx_total_kg = float(vra_df['Total(kg)'].sum())   # Rx 처방 총량(지도 적분값)
                 spray_ha = float(vra_df['Area(ha)'].sum())
                 spray_py = spray_ha * 10000.0 / PYEONG_M2
                 field_py = (field_area_m2 / PYEONG_M2) if field_area_m2 else None
-                avg_rate = (total_kg / spray_ha) if spray_ha > 0 else 0.0
-                # 확인용 이미지 정보: 총 필지면적(평) / 총 비료량(kg, 포) / 그리드 크기
+                # 살포 보정계수(overage_factor): Rx는 목표÷factor로 낮춰 냈으므로,
+                # 예상 실제 살포량(=적재 필요량=목표) = Rx × factor. 기본 1.0(드론·소규모=보정 없음).
+                overage = 1.0
+                try:
+                    _of = field_info['overage_factor'] if (field_info is not None and 'overage_factor' in field_info.index) else None
+                    if _of is not None and not pd.isna(_of) and float(_of) > 0:
+                        overage = float(_of)
+                except Exception:
+                    overage = 1.0
+                total_kg = rx_total_kg * overage    # 예상 실제 살포량(적재 기준). factor=1이면 = Rx
+                avg_rate = (rx_total_kg / spray_ha) if spray_ha > 0 else 0.0   # 지도 rate 기준(Rx)
+                # 확인용 이미지 정보: 총 필지면적(평) / 비료량(kg, 포) / 그리드 크기
                 area_disp = field_py if field_py else spray_py
-                img_info = (f"총 {area_disp:,.0f}평  |  비료 {total_kg:,.1f}kg ({total_kg / BAG_KG:.1f}포)"
-                            f"  |  그리드 {current_grid_size:g}m")
+                if abs(overage - 1.0) > 1e-9:
+                    img_info = (f"총 {area_disp:,.0f}평  |  Rx {rx_total_kg:,.0f}kg → 예상실제 {total_kg:,.0f}kg "
+                                f"({total_kg / BAG_KG:.1f}포, 보정×{overage:g})  |  그리드 {current_grid_size:g}m")
+                else:
+                    img_info = (f"총 {area_disp:,.0f}평  |  비료 {total_kg:,.1f}kg ({total_kg / BAG_KG:.1f}포)"
+                                f"  |  그리드 {current_grid_size:g}m")
                 summary_rows.append({
                     "필지": field_code,
                     "경작자": _field_str(field_info, '경작자'),
                     "기체": drone_type,
                     "계산방식": _calc_mode_label(field_info),
                     "비료기준": _fert_setting_label(field_info),
+                    "보정계수": round(overage, 3),
                     "총비료량(kg)": round(total_kg, 2),
                     "포대수(20kg)": round(total_kg / BAG_KG, 2),
                     "필요포대수(올림)": int(math.ceil(total_kg / BAG_KG)),
+                    "Rx처방적분(kg)": round(rx_total_kg, 2),
                     "필지면적(평)": round(field_py, 1) if field_py else "",
                     "살포면적(평)": round(spray_py, 1),
                     "살포면적(ha)": round(spray_ha, 4),
