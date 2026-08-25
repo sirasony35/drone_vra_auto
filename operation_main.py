@@ -50,10 +50,10 @@ pd.set_option('future.no_silent_downcasting', True)
 # ======================================================
 # 0. 설정
 # ======================================================
-DATA_FOLDER = "data/sm_data"
-BOUNDARY_FOLDER = "data/ShapeFile"
-OUTPUT_FOLDER = "result/sm_0811_dji"
-VRA_CSV_PATH = "vra_setting/sm_vra.csv"
+DATA_FOLDER = "data/간척지_데모"
+BOUNDARY_FOLDER = "data/간척지_데모_boundary"
+OUTPUT_FOLDER = "result/gancheokji_demo_0825"
+VRA_CSV_PATH = "vra_setting/gancheokji_demo_vra.csv"
 
 DEFAULT_GRID_SIZE = 1.0
 DEFAULT_CROP = 'rice'
