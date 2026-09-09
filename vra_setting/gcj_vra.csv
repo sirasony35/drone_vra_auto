@@ -1,0 +1,3 @@
+﻿field,total,spread,crop,grid_size,sigma,masking,height,width,drone_type,rate_kg,rate_area,field_area,area_unit,overage_factor
+GCJ2-2,180,1,rice,1,,0.5,3,5,DJI,,,,,
+GCJ2-3,180,1,rice,1,,0.5,3,5,DJI,,,,,

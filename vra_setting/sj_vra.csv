@@ -1,0 +1,13 @@
+﻿field,total,spread,crop,grid_size,sigma,masking,height,width,drone_type,rate_kg,rate_area,field_area,area_unit,overage_factor
+SM13,400,1,rice,1,,0.5,3,5,DJI,,,,,
+SM14,400,1,rice,1,,0.5,3,5,DJI,,,,,
+SM15,400,1,rice,1,,0.5,3,5,DJI,,,,,
+SM16,400,1,rice,1,,0.5,3,5,DJI,,,,,
+SM17,400,1,rice,1,,0.5,3,5,DJI,,,,,
+SM18,400,1,rice,1,,0.5,3,5,DJI,,,,,
+SM19,500,1,rice,1,,0.5,3,5,DJI,,,,,
+SM20,500,1,rice,1,,0.5,3,5,DJI,,,,,
+SM21,500,1,rice,1,,0.5,3,5,DJI,,,,,
+SM22,500,1,rice,1,,0.5,3,5,DJI,,,,,
+SM23,500,1,rice,1,,0.5,3,5,DJI,,,,,
+SM24,500,1,rice,1,,0.5,3,5,DJI,,,,,
