@@ -512,6 +512,32 @@ def _prof_m(prof, res):
     return np.arange(len(p)) * res, p
 
 
+def draw_stripe_guide(ax, shape, ang, lam_m, res_m, label=None):
+    """감지된 평행 띠의 방향·간격을 이미지 위에 박스 + 점선 가이드로 표시."""
+    import matplotlib.patches as mp
+    H, W = shape
+    cx, cy = W / 2.0, H / 2.0
+    lam_px = max(lam_m / res_m, 4.0)
+    th = math.radians(ang)
+    dx, dy = math.cos(th), math.sin(th)          # 띠(선)가 뻗는 방향
+    nx, ny = -math.sin(th), math.cos(th)         # 띠 간격 방향(띠에 직각)
+    Lb = 0.40 * max(H, W)                        # 박스 반길이(띠 방향)
+    halfw = 1.6 * lam_px                         # 박스 반폭(약 3개 띠 포함)
+    corners = [(cx + dx * Lb + nx * halfw, cy + dy * Lb + ny * halfw),
+               (cx - dx * Lb + nx * halfw, cy - dy * Lb + ny * halfw),
+               (cx - dx * Lb - nx * halfw, cy - dy * Lb - ny * halfw),
+               (cx + dx * Lb - nx * halfw, cy + dy * Lb - ny * halfw)]
+    ax.add_patch(mp.Polygon(corners, closed=True, fill=False, ec="#00e5ff", lw=2.2))
+    for k in (-1, 0, 1):                          # 박스 안 평행 띠 위치 점선
+        ox, oy = cx + nx * lam_px * k, cy + ny * lam_px * k
+        ax.plot([ox - dx * Lb, ox + dx * Lb], [oy - dy * Lb, oy + dy * Lb],
+                color="#00e5ff", lw=1.0, ls="--", alpha=0.85)
+    if label:
+        ax.text(0.02, 0.02, label, transform=ax.transAxes, fontsize=8.5, color="#00343d",
+                va="bottom", ha="left", bbox=dict(boxstyle="round,pad=0.25", fc="#b8f2ff", ec="#00bcd4", alpha=0.9))
+    ax.set_xlim(0, W); ax.set_ylim(H, 0)
+
+
 def stripe_overview(meta, assess):
     """1페이지: 판단 방법·가능성·한계 + 필지별 판정 요약표."""
     fig = plt.figure(figsize=(14, 9)); fig.patch.set_facecolor("white")
@@ -523,9 +549,9 @@ def stripe_overview(meta, assess):
     axL = fig.add_axes([0.04, 0.08, 0.46, 0.80]); axL.axis("off")
     blocks = [
         ("■ 원리 (왜 보이나)", "#1a5276",
-         "요소(N) 비료 → 엽록소↑ → GNDVI↑(진함). 안 뿌린 띠는\nGNDVI가 낮게(연하게) 남음. 드론은 평행 비행(스와스)이라\n미살포는 '일정 간격 평행 띠'로 나타남."),
+         "요소(N) 비료 → 엽록소↑ → GNDVI↑(진함). 안 뿌린 곳은\nGNDVI가 낮게(연하게) 남음. 드론은 밭을 '한 줄씩' 평행하게\n날며 뿌리므로, 안 뿌린 줄은 '일정 간격 평행 띠'로 보임."),
         ("■ 무엇을 측정했나", "#1a5276",
-         "① 띠 방향(°)·간격(m)  ② 진한 띠 vs 연한 띠 GNDVI 차\n③ 시비 前→後 그 띠가 '생겼는지'(前엔 약→後 강)\n④ 모내기/기계자국 방향과 다른지."),
+         "① 띠 방향(°)·띠 사이 간격(m)  ② 진한 띠 vs 연한 띠 GNDVI 차\n③ 시비 前→後 그 띠가 '생겼는지'(前엔 약→後 강)\n④ 모내기/기계자국 방향과 다른지."),
         ("■ 판단 가능 조건 (모두 충족시 '가능성 높음')", "#1e8449",
          "ⓐ 평행·규칙 간격 띠가 보임\nⓑ 시비 後에 생김(前엔 약함) = 살포 유래\nⓒ 진한/연한 차가 뚜렷(약 0.03 GNDVI 이상)\nⓓ 처방 그리드(5m)와 간격이 비슷."),
         ("■ 한계 (왜 '가능성'인가)", "#c0392b",
@@ -540,7 +566,8 @@ def stripe_overview(meta, assess):
     axR = fig.add_axes([0.53, 0.10, 0.44, 0.74]); axR.axis("off")
     axR.text(0.5, 1.02, "필지별 판정 요약", ha="center", fontsize=13, fontweight="bold", transform=axR.transAxes)
     rows = [["필지", "구분", "띠 간격", "진한-연한\nGNDVI차", "前→後", "판정"]]
-    order = sorted(assess.keys(), key=lambda c: -assess[c]["amp_a"])
+    fieldorder = ["GJR1", "GJR2", "GJR3", "GJR4", "GJR5", "GJR6", "GJR11", "GJR14", "GJR15", "GJR16"]
+    order = [c for c in fieldorder if c in assess] + [c for c in assess if c not in fieldorder]
     disp = {VARIABLE: "변량", UNIFORM: "균일", RDA: "농진청", NONE_: "무처리"}
     short = {"미살포 줄무늬 가능성 높음 (시비 後 생김)": "가능성 높음",
              "띠 있으나 시비 前부터 존재 → 미살포로 단정 어려움": "前부터 존재",
@@ -590,18 +617,22 @@ def stripe_page(m, S):
              f"  ({'시비 때 생김' if emerged else '前과 비슷(前부터 존재)'})",
              ha="center", fontsize=10.5, color="#666")
     # 상단: 後 GNDVI 실제 / 後 잔차 / 前 잔차
-    ax = fig.add_subplot(gs[0, 0]); ax.axis("off"); ax.set_title("시비後 GNDVI (실제·진함=고)", fontsize=11)
+    lbl = f"평행 띠 방향 {A['angle']:.0f}° · 간격 {A['wavelength']:.1f}m"
+    ax = fig.add_subplot(gs[0, 0]); ax.axis("off")
+    ax.set_title("시비後 GNDVI (실제·진함=고) + 띠 위치 박스", fontsize=11)
     arr_a = Ra["arr"]; lo, hi = np.nanpercentile(arr_a, 3), np.nanpercentile(arr_a, 98)
     ax.imshow(arr_a, cmap=GREEN, vmin=lo, vmax=hi)
-    ax = fig.add_subplot(gs[0, 1]); ax.axis("off"); ax.set_title("시비後 띠 강조(추세제거)", fontsize=11)
+    draw_stripe_guide(ax, arr_a.shape, A["angle"], A["wavelength"], Ra["res_m"], label=lbl)
+    ax = fig.add_subplot(gs[0, 1]); ax.axis("off"); ax.set_title("시비後 띠 강조(추세제거) + 띠 박스", fontsize=11)
     r = np.where(Ra["valid"], Ra["resid"], np.nan); vm = np.nanpercentile(np.abs(r), 97)
     ax.imshow(r, cmap=DIVCM, vmin=-vm, vmax=vm)
+    draw_stripe_guide(ax, r.shape, A["angle"], A["wavelength"], Ra["res_m"])
     ax = fig.add_subplot(gs[0, 2]); ax.axis("off"); ax.set_title("시비前 띠 강조 (비교)", fontsize=11)
     if Rb is not None:
         rb = np.where(Rb["valid"], Rb["resid"], np.nan)
         ax.imshow(rb, cmap=DIVCM, vmin=-vm, vmax=vm)
     # 하단: 프로파일 前後 / RGB / 해설
-    axp = fig.add_subplot(gs[1, 0]); axp.set_title("띠 횡단 프로파일 (스와스에 수직)", fontsize=10)
+    axp = fig.add_subplot(gs[1, 0]); axp.set_title("띠를 가로지른 단면 (평행 띠에 직각으로 자름)", fontsize=10)
     if S["B"] is not None and S["B"]["profile"] is not None:
         xb, pb = _prof_m(S["B"]["profile"], Rb["res_m"]); axp.plot(xb, pb, color="#9aa0a6", lw=0.9, label="시비前")
     if A["profile"] is not None:
@@ -616,7 +647,7 @@ def stripe_page(m, S):
     plant_txt = ""
     if S["plant"] is not None and S["dir_diff"] is not None:
         same = S["dir_diff"] <= 20
-        plant_txt = (f"• 모내기/기계자국 방향 {S['plant']['angle']:.0f}°와 스와스 방향 "
+        plant_txt = (f"• 모내기/기계자국 방향 {S['plant']['angle']:.0f}°와 살포 띠 방향 "
                      f"{A['angle']:.0f}°는 {S['dir_diff']:.0f}° 차 → "
                      + ("같은 방향(구분 어려움)" if same else "다른 방향(살포 띠로 구분됨)"))
     lines = [
