@@ -18,8 +18,12 @@
 사용: python analyze_gj_vra_effect.py
 의존성: rasterio, numpy, scipy, matplotlib, openpyxl, (선택)contextily, PIL
 """
-import os, glob, math
+import os, glob, math, sys
 from pathlib import Path
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # 콘솔 한글/기호 출력 안전
+except Exception:
+    pass
 import numpy as np
 import rasterio
 from rasterio.warp import transform_bounds
@@ -221,45 +225,72 @@ def crop_valid(a, valid, pad=4):
     return a[y0:y1, x0:x1], valid[y0:y1, x0:x1]
 
 
-def stripe_metric(path):
-    """살포 줄무늬 강도를 2D FFT 환형(annulus)에서 측정.
-    반환: dict(strength, wavelength_m, angle_deg, residual, valid, res_m, fft_log, peak_rc, annulus)
-    strength = 환형 내 최대 피크 / 환형 중앙값 (prominence). 높을수록 주기적 줄무늬 강함.
-    파장대 = 2.5~15 m (드론 살포 스와스 간격 대역)."""
-    a, valid, res_m = load_for_fft(path)
+STRIPE_LAM_LO, STRIPE_LAM_HI = 2.5, 15.0   # 드론 살포 스와스 간격 대역(m)
+
+
+def load_resid(path, px_m=0.06):
+    """GNDVI를 읽어 대규모 추세를 제거한 잔차(resid)를 만든다.
+    반환 dict(resid, valid, res_m, arr[실제GNDVI nan], mean)."""
+    a, valid, res_m = load_for_fft(path, px_m=px_m)
     a, valid = crop_valid(a, valid)
-    # 대규모 추세 제거 → 잔차
-    filled = np.where(valid, a, np.nan)
-    mean_v = np.nanmean(filled)
-    filled = np.where(valid, filled, mean_v)
-    trend = gaussian_filter(filled, sigma=max(a.shape) / 60.0)
+    arr = np.where(valid, a, np.nan)
+    mean_v = float(np.nanmean(arr))
+    filled = np.where(valid, arr, mean_v)
+    trend = gaussian_filter(filled, sigma=max(a.shape) / 50.0)
     resid = np.where(valid, filled - trend, 0.0)
-    # 윈도우(해닝)로 경계 누설 억제
-    hy = np.hanning(resid.shape[0])[:, None]
-    hx = np.hanning(resid.shape[1])[None, :]
-    win = resid * hy * hx
-    F = np.fft.fftshift(np.abs(np.fft.fft2(win)))
-    cy, cx = np.array(F.shape) // 2
-    yy, xx = np.indices(F.shape)
-    fy = (yy - cy) / F.shape[0]   # cycles/pixel
-    fx = (xx - cx) / F.shape[1]
-    freq = np.sqrt(fy**2 + fx**2)      # cycles/pixel
-    freq_m = freq / res_m              # cycles/meter
-    lam_m = np.where(freq_m > 0, 1.0 / np.maximum(freq_m, 1e-9), 1e9)  # wavelength m
-    annulus = (lam_m >= 2.5) & (lam_m <= 15.0)
-    if annulus.sum() < 10:
-        return None
-    vals = F[annulus]
-    med = np.median(vals)
-    peak = vals.max()
-    strength = float(peak / (med + 1e-9))
-    pr, pc = np.unravel_index(np.argmax(np.where(annulus, F, -1)), F.shape)
-    wl = float(lam_m[pr, pc])
-    ang = float((math.degrees(math.atan2(fy[pr, pc], fx[pr, pc])) + 90) % 180)  # 줄무늬 진행방향
-    return dict(strength=strength, wavelength_m=wl, angle_deg=ang,
-                residual=resid, valid=valid, res_m=res_m,
-                fft_log=np.log1p(F), peak_rc=(pr, pc), annulus=annulus,
-                cyx=(cy, cx))
+    return dict(resid=resid, valid=valid, res_m=res_m, arr=arr, mean=mean_v)
+
+
+def profile_at_angle(R, ang):
+    """잔차를 ang도 회전시켜 '줄무늬에 수직' 방향의 1D 프로파일(평균 GNDVI 잔차)을 뽑는다."""
+    from scipy.ndimage import rotate
+    r = rotate(R["resid"], -ang, reshape=True, order=1, cval=0.0)
+    v = rotate(R["valid"].astype("float32"), -ang, reshape=True, order=1, cval=0.0)
+    m = v > 0.5
+    rr = np.where(m, r, np.nan)
+    cnt = m.sum(axis=1)
+    with np.errstate(invalid="ignore"):
+        prof = np.nansum(np.where(m, r, 0.0), axis=1) / np.maximum(cnt, 1)
+    prof = prof[cnt > (0.3 * np.nanmax(cnt))]   # 유효 폭이 충분한 행만
+    return prof
+
+
+def profile_periodicity(prof, res_m):
+    """1D 프로파일의 스와스 대역(2.5~15m) 주기성. 반환 (strength, wavelength_m, peak2trough).
+    peak2trough = 지배 정현파의 진폭×2 ≈ '진한 띠 − 연한 띠' GNDVI 차."""
+    p = prof[np.isfinite(prof)]
+    if len(p) < 16:
+        return 0.0, 0.0, 0.0
+    p = p - p.mean()
+    n = len(p)
+    w = np.hanning(n)
+    F = np.abs(np.fft.rfft(p * w))
+    freqs = np.fft.rfftfreq(n, d=res_m)          # cycles/m
+    lam = 1.0 / np.maximum(freqs, 1e-9)
+    band = (lam >= STRIPE_LAM_LO) & (lam <= STRIPE_LAM_HI)
+    if band.sum() < 2:
+        return 0.0, 0.0, 0.0
+    k = int(np.argmax(np.where(band, F, -1)))
+    amp = 2.0 * F[k] / np.sum(w)                 # 정현파 진폭
+    strength = float(F[k] / (np.median(F[band]) + 1e-9))
+    return strength, float(lam[k]), float(2.0 * amp)
+
+
+def scan_best_angle(R, step=5):
+    """0~175도 스캔해 스와스 주기성이 가장 강한 방향을 찾는다."""
+    best = (-1.0, 0.0, 0.0, 0.0, None)
+    for ang in range(0, 180, step):
+        prof = profile_at_angle(R, ang)
+        s, lam, amp = profile_periodicity(prof, R["res_m"])
+        if s > best[0]:
+            best = (s, float(ang), lam, amp, prof)
+    return dict(strength=best[0], angle=best[1], wavelength=best[2], amplitude=best[3], profile=best[4])
+
+
+def eval_at_angle(R, ang):
+    prof = profile_at_angle(R, ang)
+    s, lam, amp = profile_periodicity(prof, R["res_m"])
+    return dict(strength=s, angle=ang, wavelength=lam, amplitude=amp, profile=prof)
 
 
 # ---------------- 필지 상세 페이지 ----------------
@@ -436,123 +467,174 @@ def cover_page(recs, meta):
     return str(out)
 
 
-# ---------------- 선무늬(미살포 패턴) 분석 페이지 ----------------
-def stripe_page(m, sb, sa):
-    """한 필지의 시비 前(sb)/後(sa) 줄무늬 비교 페이지."""
-    code, grp = m["code"], m["grp"]
-    ar = find_tif(code, AFTER_RD, "RGB")
-    fig = plt.figure(figsize=(14, 8.8))
-    gs = gridspec.GridSpec(2, 3, height_ratios=[1.0, 1.0], hspace=0.26, wspace=0.18,
-                           left=0.04, right=0.97, top=0.84, bottom=0.05)
-    grp_disp = {VARIABLE: "변량(대동)", UNIFORM: "균일(대동)", RDA: "농진청", NONE_: "무처리"}[grp]
-    gcol = {VARIABLE: "#c0392b", UNIFORM: "#2874a6", RDA: "#1e8449", NONE_: "#7f8c8d"}[grp]
-    ds = (sa["strength"] - sb["strength"]) if (sb and sa) else float("nan")
-    fig.suptitle(f"{code}  [{grp_disp}]  살포 줄무늬(미살포 선) 분석", fontsize=18, fontweight="bold",
-                 y=0.975, color=gcol)
-    if sa:
-        fig.text(0.5, 0.925,
-                 f"줄무늬 강도  前 {sb['strength']:.1f} → 後 {sa['strength']:.1f}  (Δ {ds:+.1f})  |  "
-                 f"띠 간격 ~{sa['wavelength_m']:.1f} m  ·  방향 {sa['angle_deg']:.0f}°",
-                 ha="center", fontsize=12, color="#333")
-    fig.text(0.5, 0.89,
-             "※ 줄무늬 강도 = 시비 後 GNDVI의 주기적 띠(스와스) 세기(FFT). 높을수록 '선 긋듯' 미살포 띠가 뚜렷",
-             ha="center", fontsize=9.3, color="#888")
-    # 상단: 後 RGB / 後 GNDVI 잔차 / FFT
-    ax = fig.add_subplot(gs[0, 0]); ax.axis("off"); ax.set_title("시비後 RGB (대비강조)", fontsize=11)
-    if ar: ax.imshow(rgb_img(ar, gain=1.25))
-    ax = fig.add_subplot(gs[0, 1]); ax.axis("off"); ax.set_title("시비後 GNDVI 잔차(추세제거)", fontsize=11)
-    if sa:
-        r = np.where(sa["valid"], sa["residual"], np.nan)
-        vmax = np.nanpercentile(np.abs(r), 97)
-        ax.imshow(r, cmap=DIVCM, vmin=-vmax, vmax=vmax)
-    ax = fig.add_subplot(gs[0, 2]); ax.axis("off"); ax.set_title("FFT (주기성) · 환형=스와스 대역", fontsize=11)
-    if sa:
-        fl = sa["fft_log"]; cy, cx = sa["cyx"]
-        ax.imshow(fl, cmap="magma")
-        pr, pc = sa["peak_rc"]; ax.plot(pc, pr, "o", mfc="none", mec="#00e5ff", ms=14, mew=2)
-        ax.plot(cx, cy, "+", color="w", ms=8)
-    # 하단: 前 GNDVI 잔차 / 프로파일 / 설명
-    ax = fig.add_subplot(gs[1, 0]); ax.axis("off"); ax.set_title("시비前 GNDVI 잔차", fontsize=11)
-    if sb:
-        r = np.where(sb["valid"], sb["residual"], np.nan)
-        vmax = np.nanpercentile(np.abs(r), 97)
-        ax.imshow(r, cmap=DIVCM, vmin=-vmax, vmax=vmax)
-    axp = fig.add_subplot(gs[1, 1]); axp.set_title("띠 횡단 프로파일(後, 평행띠에 수직)", fontsize=10)
-    if sa:
-        r = np.where(sa["valid"], sa["residual"], np.nan)
-        # 줄무늬에 수직인 축(=평균 프로파일 변동이 큰 축)으로 투영
-        with np.errstate(invalid="ignore"):
-            px = np.nanmean(r, axis=0); py = np.nanmean(r, axis=1)
-        prof = py if np.nanstd(py) >= np.nanstd(px) else px
-        prof = prof[np.isfinite(prof)]
-        axp.plot(np.arange(len(prof)) * sa["res_m"], prof, color="#c0392b", lw=0.9)
-        axp.axhline(0, color="#888", lw=0.6); axp.set_xlabel("띠 횡단 위치 (m)", fontsize=8)
-        axp.set_ylabel("GNDVI 잔차", fontsize=8); axp.tick_params(labelsize=7)
-    axt = fig.add_subplot(gs[1, 2]); axt.axis("off")
-    if sa:
-        if grp == VARIABLE and ds >= 2:
-            judge = "[검증됨] 변량 — 시비 후 평행 띠 증가"
-            jc = "#c0392b"
-        elif grp in (RDA, UNIFORM) and ds <= 0:
-            judge = "[대조] 농진청/균일 — 띠 증가 없음(고르게 살포)"
-            jc = "#1e8449"
-        elif grp == VARIABLE and ds > 0:
-            judge = "변량 — 띠 소폭 증가"
-            jc = "#e67e22"
-        else:
-            judge = "띠 증가 없음(Δ≤0)"
-            jc = "#555"
-        axt.text(0.5, 0.88, judge, ha="center", fontsize=12.5, fontweight="bold", color=jc, transform=axt.transAxes)
-        note = ("드론 변량살포는 처방 등급에 따라 살포량을 바꾸며 비행 띠(스와스)를 따라\n"
-                "줄무늬가 생길 수 있음. 잔차맵·FFT의 일정 간격 평행 띠 = '선 긋듯' 미살포/과살포.\n\n"
-                "※ 모내기 줄·기계 자국도 띠로 보이며 시비 前에도 존재 →\n"
-                "   '살포 유래' 띠는 前→後 강도 증가(Δ>0)로 분리해 판단.\n"
-                "   농진청/균일 살포는 전면 균등 → Δ≤0(대조군).")
-        axt.text(0.03, 0.72, note, fontsize=9.5, transform=axt.transAxes, va="top", wrap=True)
-    out = STR / f"{code}.png"
-    fig.savefig(out, dpi=135, bbox_inches="tight"); plt.close(fig)
+# ---------------- 선무늬(미살포 패턴) 분석 ----------------
+def assess_stripe(code):
+    """한 필지의 살포 줄무늬를 방향 스캔 + 횡단 프로파일로 정량 평가.
+    - 後 영상에서 스와스 방향/간격/진폭(진한-연한 GNDVI 차)을 찾고,
+    - 같은 방향으로 前 영상의 진폭을 재어 '시비 때 생겼는지'(emergence) 판정,
+    - 前의 지배 방향(=모내기·기계자국)과 스와스 방향 차이를 잰다."""
+    bg = find_tif(code, BEFORE_RD, "GNDVI"); ag = find_tif(code, AFTER_RD, "GNDVI")
+    if not ag:
+        return None
+    Ra = load_resid(ag); Rb = load_resid(bg) if bg else None
+    A = scan_best_angle(Ra)
+    B = eval_at_angle(Rb, A["angle"]) if Rb else None
+    plant = scan_best_angle(Rb) if Rb else None
+    amp_a = A["amplitude"]; amp_b = B["amplitude"] if B else 0.0
+    emerge = amp_a / (amp_b + 1e-6)
+    dd = None
+    if plant:
+        d = abs(A["angle"] - plant["angle"]); dd = min(d, 180 - d)
+    return dict(code=code, Ra=Ra, Rb=Rb, A=A, B=B, plant=plant,
+                amp_a=amp_a, amp_b=amp_b, emerge=emerge, dir_diff=dd,
+                mean_a=Ra["mean"], hi=Ra["mean"] + amp_a / 2, lo=Ra["mean"] - amp_a / 2)
+
+
+def stripe_verdict(grp, S):
+    """필지별 '미살포 줄무늬' 판정. amp=진한−연한 GNDVI 차, emerged=시비때 생김."""
+    amp = S["amp_a"]
+    emerged = (S["amp_a"] > S["amp_b"] * 1.3) and (S["amp_a"] - S["amp_b"] > 0.008)
+    if grp in (RDA, UNIFORM):
+        if amp < 0.025:
+            return "고르게 살포 — 미살포 띠 거의 없음 (대조군)", "#1e8449", emerged
+        return "띠 일부 있으나 대조군(참고)", "#2874a6", emerged
+    if amp >= 0.030 and emerged:
+        return "미살포 줄무늬 가능성 높음 (시비 後 생김)", "#c0392b", emerged
+    if amp >= 0.030 and not emerged:
+        return "띠 있으나 시비 前부터 존재 → 미살포로 단정 어려움", "#e67e22", emerged
+    if amp >= 0.018:
+        return "약한 띠 — 판단 보류", "#e67e22", emerged
+    return "띠 미약 — 고르게 살포로 판단", "#1e8449", emerged
+
+
+def _prof_m(prof, res):
+    p = prof[np.isfinite(prof)]
+    return np.arange(len(p)) * res, p
+
+
+def stripe_overview(meta, assess):
+    """1페이지: 판단 방법·가능성·한계 + 필지별 판정 요약표."""
+    fig = plt.figure(figsize=(14, 9)); fig.patch.set_facecolor("white")
+    fig.text(0.5, 0.965, "살포 줄무늬(미살포 선) 판단이 가능한가? — 방법·근거·한계", ha="center",
+             fontsize=19, fontweight="bold")
+    fig.text(0.5, 0.925, "농가 제보: '드론이 날며 안 뿌리는 곳이 있다. 뿌린 곳은 진하게 올라오고 안 뿌린 곳은 연하다'",
+             ha="center", fontsize=11.5, color="#555")
+    # 좌: 방법/가능성/한계 텍스트
+    axL = fig.add_axes([0.04, 0.08, 0.46, 0.80]); axL.axis("off")
+    blocks = [
+        ("■ 원리 (왜 보이나)", "#1a5276",
+         "요소(N) 비료 → 엽록소↑ → GNDVI↑(진함). 안 뿌린 띠는\nGNDVI가 낮게(연하게) 남음. 드론은 평행 비행(스와스)이라\n미살포는 '일정 간격 평행 띠'로 나타남."),
+        ("■ 무엇을 측정했나", "#1a5276",
+         "① 띠 방향(°)·간격(m)  ② 진한 띠 vs 연한 띠 GNDVI 차\n③ 시비 前→後 그 띠가 '생겼는지'(前엔 약→後 강)\n④ 모내기/기계자국 방향과 다른지."),
+        ("■ 판단 가능 조건 (모두 충족시 '가능성 높음')", "#1e8449",
+         "ⓐ 평행·규칙 간격 띠가 보임\nⓑ 시비 後에 생김(前엔 약함) = 살포 유래\nⓒ 진한/연한 차가 뚜렷(약 0.03 GNDVI 이상)\nⓓ 처방 그리드(5m)와 간격이 비슷."),
+        ("■ 한계 (왜 '가능성'인가)", "#c0392b",
+         "모내기 줄·써레 자국·배수 길도 비슷한 띠를 만듦 →\n前→後·방향으로 최대한 분리하나, 영상만으론 확정 불가.\n확정하려면 드론 '살포 비행로그/처방맵'을 영상에 겹쳐야 함."),
+    ]
+    y = 0.98
+    for title, tc, body in blocks:
+        axL.text(0.0, y, title, fontsize=12, fontweight="bold", color=tc, transform=axL.transAxes, va="top")
+        axL.text(0.02, y - 0.045, body, fontsize=10, transform=axL.transAxes, va="top")
+        y -= 0.045 + 0.052 * (body.count("\n") + 1) + 0.025
+    # 우: 필지별 판정 요약표
+    axR = fig.add_axes([0.53, 0.10, 0.44, 0.74]); axR.axis("off")
+    axR.text(0.5, 1.02, "필지별 판정 요약", ha="center", fontsize=13, fontweight="bold", transform=axR.transAxes)
+    rows = [["필지", "구분", "띠 간격", "진한-연한\nGNDVI차", "前→後", "판정"]]
+    order = sorted(assess.keys(), key=lambda c: -assess[c]["amp_a"])
+    disp = {VARIABLE: "변량", UNIFORM: "균일", RDA: "농진청", NONE_: "무처리"}
+    short = {"미살포 줄무늬 가능성 높음 (시비 後 생김)": "가능성 높음",
+             "띠 있으나 시비 前부터 존재 → 미살포로 단정 어려움": "前부터 존재",
+             "약한 띠 — 판단 보류": "판단 보류",
+             "띠 미약 — 고르게 살포로 판단": "고르게",
+             "고르게 살포 — 미살포 띠 거의 없음 (대조군)": "고르게(대조)",
+             "띠 일부 있으나 대조군(참고)": "일부(대조)"}
+    cell_colors = [["white"] * 6]
+    for c in order:
+        S = assess[c]; grp = meta[c]["grp"]
+        v, vc, emerged = stripe_verdict(grp, S)
+        rows.append([c, disp[grp], f"{S['A']['wavelength']:.1f}m",
+                     f"{S['amp_a']:.3f}", ("생김" if emerged else "비슷"),
+                     short.get(v, v)])
+        cell_colors.append(["white", "white", "white", "white", "white", vc])
+    tb = axR.table(cellText=rows, cellLoc="center", loc="upper center", bbox=[0, 0, 1, 1.0])
+    tb.auto_set_font_size(False); tb.set_fontsize(8.5)
+    for (rr, cc), cell in tb.get_celld().items():
+        if rr == 0:
+            cell.set_facecolor("#2c3e50"); cell.set_text_props(color="white", fontweight="bold")
+        elif cc == 5:
+            cell.set_facecolor(cell_colors[rr][5]); cell.set_text_props(color="white", fontweight="bold", fontsize=8)
+    out = STR / "_overview.png"; fig.savefig(out, dpi=140, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return str(out)
 
 
-def stripe_summary(meta, strengths):
-    """필지별 살포유래 줄무늬 = Δ(後-前) 랭킹 요약.
-    절대강도는 모내기 줄·기계자국을 포함하므로 Δ로 '살포 유래' 띠를 분리한다."""
-    fig = plt.figure(figsize=(13.8, 8.2)); fig.patch.set_facecolor("white")
-    fig.text(0.5, 0.95, "살포 줄무늬(미살포 선) 검증 — 시비 前→後 변화(Δ)", ha="center",
-             fontsize=20, fontweight="bold")
-    fig.text(0.5, 0.905,
-             "농가 제보: '농진청 살포는 고른데 대동 변량한 곳은 선 긋듯 안 뿌려진 띠가 있다'  →  드론영상 검증",
-             ha="center", fontsize=11.5, color="#555")
-    order = sorted(strengths.items(), key=lambda kv: -(kv[1]["after"] - kv[1]["before"]))
-    names = [k for k, _ in order]
-    before = [v["before"] for _, v in order]
-    after = [v["after"] for _, v in order]
-    delta = [a - b for a, b in zip(after, before)]
-    gcolmap = {VARIABLE: "#c0392b", UNIFORM: "#2874a6", RDA: "#1e8449", NONE_: "#bdc3c7"}
-    cols = [gcolmap[meta[k]["grp"]] for k in names]
-    # 상단: Δ (살포유래 띠) — 핵심
-    ax1 = fig.add_axes([0.08, 0.50, 0.88, 0.34])
-    ax1.bar(names, delta, color=cols)
-    ax1.axhline(0, color="black", lw=0.8)
-    ax1.set_ylabel("Δ 줄무늬 (後−前)\n양수=시비때 띠 생김")
-    ax1.set_title("① 살포 유래 줄무늬 (모내기 줄 제거한 순효과) — 양수일수록 '선 긋듯' 미살포", fontsize=12)
-    for i, d in enumerate(delta):
-        ax1.text(i, d, f"{d:+.1f}", ha="center", va="bottom" if d >= 0 else "top", fontsize=9, fontweight="bold")
-    ax1.set_xticklabels([])
-    # 하단: 前/後 절대강도 (모내기 줄 포함, 참고)
-    ax2 = fig.add_axes([0.08, 0.10, 0.88, 0.30])
-    x = np.arange(len(names)); w = 0.38
-    ax2.bar(x - w / 2, before, w, color="#bbbbbb", label="前(03)")
-    ax2.bar(x + w / 2, after, w, color=cols, label="後(04)")
-    ax2.set_xticks(x); ax2.set_xticklabels(names, rotation=30)
-    ax2.set_ylabel("절대 줄무늬 강도\n(모내기 줄 포함)")
-    ax2.set_title("② 절대 강도 前/後 (참고 — 모내기 줄·기계자국 포함이라 기준선 높음)", fontsize=11)
-    ax2.legend(handles=[mpatches.Patch(color="#c0392b", label="변량(대동)"),
-                        mpatches.Patch(color="#2874a6", label="균일(대동)"),
-                        mpatches.Patch(color="#1e8449", label="농진청"),
-                        mpatches.Patch(color="#bbbbbb", label="前(03)")],
-               fontsize=8.5, ncol=4, loc="upper right")
-    out = STR / "_ranking.png"; fig.savefig(out, dpi=140, bbox_inches="tight", facecolor="white"); plt.close(fig)
+def stripe_page(m, S):
+    """한 필지의 살포 줄무늬 상세 — 필지별 구체 수치·판정."""
+    code, grp = m["code"], m["grp"]
+    ar = find_tif(code, AFTER_RD, "RGB")
+    Ra, Rb, A = S["Ra"], S["Rb"], S["A"]
+    v, vc, emerged = stripe_verdict(grp, S)
+    grp_disp = {VARIABLE: "변량(대동)", UNIFORM: "균일(대동)", RDA: "농진청", NONE_: "무처리"}[grp]
+    gcol = {VARIABLE: "#c0392b", UNIFORM: "#2874a6", RDA: "#1e8449", NONE_: "#7f8c8d"}[grp]
+    fig = plt.figure(figsize=(14, 8.9))
+    gs = gridspec.GridSpec(2, 3, height_ratios=[1.05, 1.0], hspace=0.28, wspace=0.18,
+                           left=0.04, right=0.97, top=0.82, bottom=0.05)
+    fig.suptitle(f"{code}  [{grp_disp}]  살포 줄무늬(미살포 선) 분석  · 이앙 {m['transplant']}", fontsize=17,
+                 fontweight="bold", y=0.975, color=gcol)
+    grid5 = " (처방 그리드 5m와 비슷)" if 3.5 <= A["wavelength"] <= 7.5 else ""
+    fig.text(0.5, 0.932,
+             f"띠 방향 {A['angle']:.0f}° · 간격 {A['wavelength']:.1f} m{grid5}  |  "
+             f"진한 띠 GNDVI {S['hi']:.2f} vs 연한 띠 {S['lo']:.2f}  (차 {S['amp_a']:.3f})",
+             ha="center", fontsize=12, color="#333")
+    fig.text(0.5, 0.895,
+             f"시비 前 같은 방향 띠 차 {S['amp_b']:.3f} → 後 {S['amp_a']:.3f}"
+             f"  ({'시비 때 생김' if emerged else '前과 비슷(前부터 존재)'})",
+             ha="center", fontsize=10.5, color="#666")
+    # 상단: 後 GNDVI 실제 / 後 잔차 / 前 잔차
+    ax = fig.add_subplot(gs[0, 0]); ax.axis("off"); ax.set_title("시비後 GNDVI (실제·진함=고)", fontsize=11)
+    arr_a = Ra["arr"]; lo, hi = np.nanpercentile(arr_a, 3), np.nanpercentile(arr_a, 98)
+    ax.imshow(arr_a, cmap=GREEN, vmin=lo, vmax=hi)
+    ax = fig.add_subplot(gs[0, 1]); ax.axis("off"); ax.set_title("시비後 띠 강조(추세제거)", fontsize=11)
+    r = np.where(Ra["valid"], Ra["resid"], np.nan); vm = np.nanpercentile(np.abs(r), 97)
+    ax.imshow(r, cmap=DIVCM, vmin=-vm, vmax=vm)
+    ax = fig.add_subplot(gs[0, 2]); ax.axis("off"); ax.set_title("시비前 띠 강조 (비교)", fontsize=11)
+    if Rb is not None:
+        rb = np.where(Rb["valid"], Rb["resid"], np.nan)
+        ax.imshow(rb, cmap=DIVCM, vmin=-vm, vmax=vm)
+    # 하단: 프로파일 前後 / RGB / 해설
+    axp = fig.add_subplot(gs[1, 0]); axp.set_title("띠 횡단 프로파일 (스와스에 수직)", fontsize=10)
+    if S["B"] is not None and S["B"]["profile"] is not None:
+        xb, pb = _prof_m(S["B"]["profile"], Rb["res_m"]); axp.plot(xb, pb, color="#9aa0a6", lw=0.9, label="시비前")
+    if A["profile"] is not None:
+        xa, pa = _prof_m(A["profile"], Ra["res_m"]); axp.plot(xa, pa, color="#c0392b", lw=1.1, label="시비後")
+    axp.axhline(0, color="#888", lw=0.6); axp.set_xlabel("가로 위치 (m)", fontsize=8)
+    axp.set_ylabel("GNDVI 잔차 (진한+/연한−)", fontsize=8); axp.tick_params(labelsize=7); axp.legend(fontsize=8)
+    ax = fig.add_subplot(gs[1, 1]); ax.axis("off"); ax.set_title("시비後 RGB (대비강조)", fontsize=11)
+    if ar: ax.imshow(rgb_img(ar, gain=1.25))
+    axt = fig.add_subplot(gs[1, 2]); axt.axis("off")
+    axt.text(0.5, 0.96, "■ 이 필지에서 보이는 것", ha="center", fontsize=11, fontweight="bold",
+             transform=axt.transAxes, va="top")
+    plant_txt = ""
+    if S["plant"] is not None and S["dir_diff"] is not None:
+        same = S["dir_diff"] <= 20
+        plant_txt = (f"• 모내기/기계자국 방향 {S['plant']['angle']:.0f}°와 스와스 방향 "
+                     f"{A['angle']:.0f}°는 {S['dir_diff']:.0f}° 차 → "
+                     + ("같은 방향(구분 어려움)" if same else "다른 방향(살포 띠로 구분됨)"))
+    lines = [
+        f"• {A['angle']:.0f}° 방향으로 약 {A['wavelength']:.1f} m 간격 평행 띠.",
+        f"• 진한 띠 GNDVI {S['hi']:.2f}, 연한 띠 {S['lo']:.2f} → 차 {S['amp_a']:.3f}.",
+        f"• 시비 前 같은 방향 띠 차 {S['amp_b']:.3f} → 後 {S['amp_a']:.3f}"
+        + (f" ({S['emerge']:.1f}배 ↑, 시비 때 생김)" if emerged else " (前과 비슷 = 前부터 존재)"),
+    ]
+    if plant_txt:
+        lines.append(plant_txt)
+    y = 0.86
+    for ln in lines:
+        axt.text(0.0, y, ln, fontsize=9.6, transform=axt.transAxes, va="top", wrap=True)
+        y -= 0.052 * (ln.count("\n") + 1) + 0.045
+    axt.text(0.0, y - 0.01, f"■ 판정: {v}", fontsize=11, fontweight="bold", color=vc,
+             transform=axt.transAxes, va="top", wrap=True)
+    out = STR / f"{code}.png"
+    fig.savefig(out, dpi=135, bbox_inches="tight"); plt.close(fig)
     return str(out)
 
 
@@ -567,8 +649,14 @@ def make_pdf(pages, out_path, a4=(1754, 1240), margin=36):
         cv.paste(im.resize((nw, nh), Image.LANCZOS), ((a4[0] - nw) // 2, (a4[1] - nh) // 2))
         return cv
     imgs = [fit(p) for p in pages]
-    imgs[0].save(out_path, save_all=True, append_images=imgs[1:])
-    return out_path
+    try:
+        imgs[0].save(out_path, save_all=True, append_images=imgs[1:])
+        return out_path
+    except PermissionError:
+        alt = out_path.replace(".pdf", "_new.pdf")   # 뷰어에서 열려 잠긴 경우
+        imgs[0].save(alt, save_all=True, append_images=imgs[1:])
+        print(f"  [주의] {os.path.basename(out_path)} 잠김 → {os.path.basename(alt)}로 저장(뷰어 닫고 교체)")
+        return alt
 
 
 def main():
@@ -601,22 +689,20 @@ def main():
     print(f"[PDF1] {pdf1} ({len(pages)}p)")
 
     # ---- 선무늬(살포패턴) PDF ----
-    strengths = {}
-    spages = []
     # 변량 전필지 + 농진청/균일(대조) 분석
     targets = [c for c in order if meta[c]["grp"] in (VARIABLE, UNIFORM, RDA)]
+    assess = {}
     for c in targets:
-        bg = find_tif(c, BEFORE_RD, "GNDVI"); ag = find_tif(c, AFTER_RD, "GNDVI")
-        sb = stripe_metric(bg) if bg else None
-        sa = stripe_metric(ag) if ag else None
-        if sa:
-            strengths[c] = dict(before=sb["strength"] if sb else float("nan"), after=sa["strength"])
-            print(f"  [stripe] {c} [{meta[c]['grp']}] 前 "
-                  f"{sb['strength'] if sb else float('nan'):.1f} -> 後 {sa['strength']:.1f} "
-                  f"(λ={sa['wavelength_m']:.1f}m)")
-        spages.append(stripe_page(meta[c], sb, sa))
-    rank = stripe_summary(meta, strengths)
-    pdf2 = make_pdf([rank] + spages, str(OUT / "김제_살포패턴(선무늬)_분석.pdf"))
+        S = assess_stripe(c)
+        if S is None:
+            continue
+        assess[c] = S
+        v, _, em = stripe_verdict(meta[c]["grp"], S)
+        print(f"  [stripe] {c} [{meta[c]['grp']}] 방향 {S['A']['angle']:.0f}° 간격 {S['A']['wavelength']:.1f}m "
+              f"진폭 前 {S['amp_b']:.3f}→後 {S['amp_a']:.3f} ({'생김' if em else '비슷'}) | {v}")
+    ov = stripe_overview(meta, assess)
+    spages = [stripe_page(meta[c], assess[c]) for c in order if c in assess]
+    pdf2 = make_pdf([ov] + spages, str(OUT / "김제_살포패턴(선무늬)_분석.pdf"))
     print(f"[PDF2] {pdf2} ({1+len(spages)}p)")
     print("완료:", OUT)
 
