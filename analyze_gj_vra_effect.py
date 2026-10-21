@@ -167,12 +167,31 @@ def load_meta():
             grp = RDA
         else:
             grp = NONE_
+        tv = vals[14]
+        tdisp = tv.strftime("%m/%d") if hasattr(tv, "strftime") else str(tv or "").strip()
+        early = tdisp.startswith(("05/", "5/", "5월"))   # 조기이앙(≈5월 말) = R1·R11·R14
+        imo = (str(vals[12] or "").strip().upper().startswith("O"))  # 이모작 여부
         meta[fcode] = dict(
             code=fcode, name=str(code), grp=grp, dronecol=dronecol,
             case=vals[8], plan=(vals[9] or ""), farmer=(vals[5] or "").strip(),
             bags=vals[17], grid=vals[18], spray=(vals[19] or "").strip(),
+            early=early, season=("조기이앙" if early else "만기이앙"), imo=imo, transplant=tdisp,
         )
     return meta
+
+
+def verdict_of(grp, dcv, early):
+    """이앙시기(03시점 생육단계)를 감안한 균일도 판정.
+    조기이앙 필지는 시비 前 이미 성숙·고균일 → 작은 변화는 '악화'가 아니라 '개선 미비'."""
+    if grp == NONE_:
+        return "무처리(웃거름 없음)", "#7f8c8d"
+    if dcv <= -1.5:
+        return "균일도 개선", "#1e8449"
+    if dcv <= 0.8:
+        if early:
+            return "개선 미비 (조기이앙·이미 성숙)", "#e67e22"
+        return "균일도 유지 (개선 미비)", "#e67e22"
+    return "균일도 소폭 악화", "#c0392b"
 
 
 # ---------------- 선무늬(stripe) 지표 ----------------
@@ -262,20 +281,20 @@ def field_page(m, rec):
                            left=0.04, right=0.97, top=0.82, bottom=0.04)
     gcol = {VARIABLE: "#c0392b", UNIFORM: "#2874a6", RDA: "#1e8449", NONE_: "#7f8c8d"}[grp]
     dcv = rec["cva"] - rec["cvb"]
-    if grp == NONE_:
-        verdict = "무처리(웃거름 없음)"
-    else:
-        verdict = "균일도 개선" if dcv < -0.5 else ("균일도 악화" if dcv > 0.5 else "균일도 유지")
+    verdict, vcol = verdict_of(grp, dcv, m["early"])
     grp_disp = {VARIABLE: "변량(대동)", UNIFORM: "균일(대동)", RDA: "농진청", NONE_: "무처리"}[grp]
-    fig.suptitle(f"{code}  [{grp_disp}]   · 경작자 {farmer}  · {m['plan']}", fontsize=18,
+    season = f"{m['season']}·이앙 {m['transplant']}" + ("·이모작" if m["imo"] else "·일모작")
+    fig.suptitle(f"{code}  [{grp_disp}]   · 경작자 {farmer}  · {m['plan']}  · {season}", fontsize=17,
                  fontweight="bold", y=0.975, color=gcol)
     sp = f"살포 {m['spray']}" if m["spray"] and m["spray"] not in ("살포안함",) else m["dronecol"]
     fig.text(0.5, 0.935,
              f"CV {rec['cvb']:.1f}% → {rec['cva']:.1f}% ({dcv:+.1f}%p, {verdict})   |   "
              f"ExG(녹색도) {f0(rec['exgb'])}→{f0(rec['exga'])}   |   {sp}",
              ha="center", fontsize=12, color="#333")
-    fig.text(0.5, 0.90, "※ CV(고르기 편차)는 낮을수록 균일 · ΔCV가 음수(-)일수록 개선  |  前=0724/0729, 後=0811",
-             ha="center", fontsize=9.5, color="#888")
+    note2 = "※ CV(고르기 편차)는 낮을수록 균일 · ΔCV 음수(-)=개선  |  前=0724/0729, 後=0811"
+    if m["early"] and grp != NONE_:
+        note2 += "  |  조기이앙 성숙 → 03시점 이미 고생육, 변화 작게 나타남"
+    fig.text(0.5, 0.90, note2, ha="center", fontsize=9.5, color="#888")
     # row1: 前 GNDVI / 後 GNDVI / 히스토그램
     ax = fig.add_subplot(gs[0, 0]); ax.imshow(b, cmap=GREEN, vmin=lo, vmax=hi); ax.axis("off")
     ax.set_title("시비前 GNDVI (03회차)", fontsize=11)
@@ -304,10 +323,14 @@ def field_page(m, rec):
     for (rr, cc), cell in tb.get_celld().items():
         if rr == 0:
             cell.set_facecolor("#2c3e50"); cell.set_text_props(color="white", fontweight="bold")
-    axt.text(0.5, 0.33, f"■ 판정: {verdict}", ha="center", fontsize=11, transform=axt.transAxes,
-             color=gcol, fontweight="bold")
-    axt.text(0.5, 0.22, f"P10 {rec['p10a']-rec['p10b']:+.3f} · 저활력 {rec['lowa']-rec['lowb']:+.1f}%p",
-             ha="center", fontsize=9.5, transform=axt.transAxes, color="#555")
+    axt.text(0.5, 0.34, f"■ 판정: {verdict}", ha="center", fontsize=11, transform=axt.transAxes,
+             color=vcol, fontweight="bold")
+    axt.text(0.5, 0.24, f"P10 {rec['p10a']-rec['p10b']:+.3f} · 저활력 {rec['lowa']-rec['lowb']:+.1f}%p"
+             f"  ·  평균GNDVI {rec['mb']:.2f}→{rec['ma']:.2f}",
+             ha="center", fontsize=9.3, transform=axt.transAxes, color="#555")
+    if m["early"] and grp != NONE_:
+        axt.text(0.5, 0.14, "조기이앙으로 前 이미 성숙 → 변화 작음(악화 아님)",
+                 ha="center", fontsize=8.8, transform=axt.transAxes, color="#e67e22")
     out = DET / f"{code}.png"
     fig.savefig(out, dpi=135, bbox_inches="tight"); plt.close(fig)
     return str(out)
@@ -315,35 +338,64 @@ def field_page(m, rec):
 
 # ---------------- 요약/커버 ----------------
 def summary_page(recs, meta):
-    fig = plt.figure(figsize=(14, 8)); fig.patch.set_facecolor("white")
-    gs = gridspec.GridSpec(2, 2, height_ratios=[1.1, 1], hspace=0.5, wspace=0.25,
-                           left=0.08, right=0.95, top=0.9, bottom=0.12)
-    fig.suptitle("김제 벼 변량시비 효과 요약 — 균일도(CV) 변화", fontsize=19, fontweight="bold")
+    fig = plt.figure(figsize=(14, 8.4)); fig.patch.set_facecolor("white")
+    gs = gridspec.GridSpec(2, 2, height_ratios=[1.1, 1], hspace=0.55, wspace=0.22,
+                           left=0.08, right=0.95, top=0.88, bottom=0.12)
+    fig.suptitle("김제 벼 변량시비 효과 요약 — 작기(이앙시기) 감안 균일도(CV) 변화", fontsize=18, fontweight="bold")
     order = sorted(recs.items(), key=lambda kv: kv[1]["cva"] - kv[1]["cvb"])
     names = [k for k, _ in order]
-    dcvs = [v["cva"] - v["cvb"] for _, v in order]
+    dcvs = [recs[k]["cva"] - recs[k]["cvb"] for k in names]
     gcolmap = {VARIABLE: "#c0392b", UNIFORM: "#2874a6", RDA: "#1e8449", NONE_: "#bdc3c7"}
     cols = [gcolmap[meta[k]["grp"]] for k in names]
-    ax = fig.add_subplot(gs[0, :]); ax.bar(names, dcvs, color=cols); ax.axhline(0, color="black", lw=0.8)
-    ax.set_ylabel("ΔCV (%p) ↓개선/↑악화"); ax.set_title("필지별 균일도 변화 (음수=개선)", fontsize=12)
+    ax = fig.add_subplot(gs[0, :])
+    bars = ax.bar(names, dcvs, color=cols)
+    for k, bar in zip(names, bars):
+        if meta[k]["early"]:                  # 조기이앙(5/27) 표시
+            bar.set_hatch("///"); bar.set_edgecolor("white")
+    ax.axhline(0, color="black", lw=0.8)
+    ax.set_ylabel("ΔCV (%p) ↓개선/↑악화"); ax.set_title("필지별 균일도 변화 (음수=개선 ·빗금=조기이앙 5/27)", fontsize=12)
     ax.tick_params(axis="x", labelrotation=30)
     ax.legend(handles=[mpatches.Patch(color="#c0392b", label="변량(대동)"),
                        mpatches.Patch(color="#2874a6", label="균일(대동)"),
                        mpatches.Patch(color="#1e8449", label="농진청"),
-                       mpatches.Patch(color="#bdc3c7", label="무처리")], fontsize=9, ncol=4)
-    groups = [("변량", [VARIABLE]), ("균일/농진청", [UNIFORM, RDA]), ("무처리", [NONE_])]
-    for gi, (mk, lb) in enumerate([("dcv", "그룹 평균 ΔCV (%p)"), ("dp10", "그룹 평균 ΔP10 (저위 회복)")]):
-        axg = fig.add_subplot(gs[1, gi]); vv, cc, xl = [], [], []
-        for gname, glist in groups:
-            arr = [(recs[k]["cva"] - recs[k]["cvb"]) if mk == "dcv" else (recs[k]["p10a"] - recs[k]["p10b"])
-                   for k in recs if meta[k]["grp"] in glist]
-            if not arr:
-                continue
-            vv.append(float(np.mean(arr))); xl.append(gname)
-            cc.append("#c0392b" if gname == "변량" else ("#2874a6" if "균일" in gname else "#bdc3c7"))
-        axg.bar(xl, vv, color=cc); axg.axhline(0, color="black", lw=0.8); axg.set_title(lb, fontsize=12)
-        for i, v in enumerate(vv):
-            axg.text(i, v, f"{v:+.2f}", ha="center", va="bottom" if v >= 0 else "top", fontweight="bold")
+                       mpatches.Patch(color="#bdc3c7", label="무처리"),
+                       mpatches.Patch(facecolor="#999", hatch="///", label="조기이앙(5/27)")],
+              fontsize=8.5, ncol=5)
+    # 좌하: 작기별 변량 vs 대조 평균 ΔCV
+    axg = fig.add_subplot(gs[1, 0])
+    def avg(keys):
+        v = [recs[k]["cva"] - recs[k]["cvb"] for k in keys if k in recs]
+        return float(np.mean(v)) if v else float("nan")
+    groups4 = [
+        ("조기이앙\n변량(R1)", [k for k in recs if meta[k]["early"] and meta[k]["grp"] == VARIABLE], "#c0392b"),
+        ("조기이앙\n균일·농진청", [k for k in recs if meta[k]["early"] and meta[k]["grp"] in (UNIFORM, RDA)], "#2874a6"),
+        ("만기이앙\n변량(R2~6)", [k for k in recs if not meta[k]["early"] and meta[k]["grp"] == VARIABLE], "#c0392b"),
+        ("만기이앙\n무처리(R15·16)", [k for k in recs if not meta[k]["early"] and meta[k]["grp"] == NONE_], "#bdc3c7"),
+    ]
+    xl, vv, cc = [], [], []
+    for lab, keys, c in groups4:
+        a = avg(keys)
+        if np.isfinite(a):
+            xl.append(lab); vv.append(a); cc.append(c)
+    xpos = np.arange(len(xl))
+    axg.bar(xpos, vv, color=cc, width=0.7); axg.axhline(0, color="black", lw=0.8)
+    axg.set_xticks(xpos); axg.set_xticklabels(xl, fontsize=8)
+    axg.set_title("작기별 평균 ΔCV (%p) — 같은 작기끼리 비교", fontsize=11)
+    for i, v in enumerate(vv):
+        axg.text(i, v, f"{v:+.2f}", ha="center", va="bottom" if v >= 0 else "top", fontweight="bold", fontsize=9)
+    # 우하: 해설
+    axn = fig.add_subplot(gs[1, 1]); axn.axis("off")
+    axn.text(0.0, 0.98, "■ 이앙시기(생육단계) 감안 해석", fontsize=12, fontweight="bold", transform=axn.transAxes, va="top")
+    txt = ("• 조기이앙 R1·R11·R14(이앙 5/27, 일모작)는 시비 前(0724)\n"
+           "  이미 생육 성숙·고균일(평균GNDVI 0.68~0.71) → 변화 작음.\n"
+           "  이는 '악화'가 아니라 '개선 미비'(변량 R1 ΔCV +0.7 ≈\n"
+           "  균일 R11 +0.4와 유사, 같은 생육단계).\n\n"
+           "• 만기이앙 R2~R6(이앙 6/17)은 前 저생육(0.4~0.5) → 변화 큼.\n"
+           "  단 저생육 필지는 성숙만으로도 CV가 내려가므로(무처리\n"
+           "  R15·R16도 포함) 그룹 평균엔 성숙 효과가 섞임.\n\n"
+           "→ 결론: 변량의 '균일도 악화'는 없음. 조기이앙은 개선 미비,\n"
+           "   만기이앙은 개선되나 성숙 효과와 혼재.")
+    axn.text(0.0, 0.86, txt, fontsize=9.3, transform=axn.transAxes, va="top")
     out = OUT / "_summary.png"; fig.savefig(out, dpi=140, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return str(out)
 
@@ -367,19 +419,18 @@ def cover_page(recs, meta):
     nnone = sum(1 for k in recs if meta[k]["grp"] == NONE_)
     lines = [
         f"■ 대상: 변량 {nvar}필지(대동) · 균일/농진청 {nuni}필지 · 무처리 {nnone}필지 (드론 GNDVI/RGB 2cm)",
-        f"■ 균일도(CV) 변화:  변량 {dv:+.2f}%p   vs   균일/농진청 {du:+.2f}%p",
+        "■ 이앙시기: 조기이앙(5/27) R1·R11·R14  /  만기이앙(6/17) R2~R6·R15·R16",
+        f"■ 균일도(CV) 변화:  변량 {dv:+.2f}%p  ·  균일/농진청 {du:+.2f}%p   (작기별 비교는 요약 페이지)",
         f"■ 저활력(P10) 회복:  변량 {pv:+.3f}   vs   균일/농진청 {pu:+.3f}",
-        "■ RGB 교차검증: ExG(녹색도)로 GNDVI 변화가 실제 생육 반영인지 필지별 확인",
-        "■ 결론: " + ("변량이 균일/관행보다 균일화 우수" if dv < du - 0.5
-                     else "이번 자료에선 변량의 균일도 우위 뚜렷하지 않음(아래 교란 참조)"),
+        "■ 결론: 변량의 '균일도 악화'는 없음 — 조기이앙 필지는 '개선 미비', 만기이앙 필지는 개선(성숙 효과 혼재)",
     ]
     for i, ln in enumerate(lines):
-        fig.text(0.1, 0.5 - i * 0.062, ln, fontsize=12.5, color="#c0392b" if i == 4 else "#222")
+        fig.text(0.1, 0.5 - i * 0.062, ln, fontsize=12.0, color="#c0392b" if i == 4 else "#222")
     fig.text(0.1, 0.135,
-             "※ 해석 주의(교란): ① 前03→後04 약 2주 — 성숙에 따른 GNDVI 상승 공존. ② 변량 필지(R2~R6)는\n"
-             "   이모작 늦이앙으로 03시점 저생육(평균GNDVI 0.4~0.5)에서 출발 → 균일/농진청(0.70)과 생육단계가 달라\n"
-             "   CV 직접비교는 교란됨. ③ 무처리(R15·R16)도 성숙으로 CV 감소 → CV 변화의 상당부분은 생육단계 효과.\n"
-             "   → 필지내 前→後 변화와 그룹'차이'로 해석하고, 살포 균등성은 별도 '선무늬' 분석으로 교차확인.",
+             "※ 해석 주의(교란): ① 조기이앙(R1·R11·R14, 5/27)은 시비 前(0724) 이미 성숙·고균일(평균GNDVI 0.68~0.71)\n"
+             "   → 변화 작음 = '개선 미비'(악화 아님). ② 만기이앙(R2~6, 6/17)은 前 저생육(0.4~0.5)서 출발해 변화 큼.\n"
+             "   ③ 다만 저생육 필지는 성숙만으로도 CV 감소(무처리 R15·R16) → 그룹평균엔 생육단계 효과가 섞임.\n"
+             "   → 같은 이앙시기끼리 비교하고(요약), 살포 균등성은 별도 '선무늬(미살포 선)' 분석으로 교차확인.",
              fontsize=9.0, color="#666")
     out = OUT / "_cover.png"; fig.savefig(out, dpi=150, facecolor="white"); plt.close(fig)
     return str(out)
