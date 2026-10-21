@@ -76,6 +76,9 @@ for n in ["Malgun Gothic", "NanumGothic", "Gulim", "Batang"]:
 plt.rcParams["axes.unicode_minus"] = False
 GREEN = LinearSegmentedColormap.from_list("g", ["#8B4513", "#DEB887", "#FFFF99", "#66BB66", "#006400"])
 DIVCM = LinearSegmentedColormap.from_list("d", ["#8e44ad", "#c39bd3", "#f2f2f2", "#f5b041", "#ca6f1e"])
+RXCM = LinearSegmentedColormap.from_list("rx", ["#1a9641", "#a6d96a", "#ffffbf", "#fdae61", "#d7191c"])
+# 처방맵(Rx, kg/ha) 폴더 — drone_vra_auto 프로젝트 내(result/ 는 git 미추적이라 PC별로 있을 수 있음)
+RX_DIR = Path(__file__).resolve().parent / "result" / "gj_1021" / "DJI" / "Rx"
 VMIN, VMAX = 0.2, 1.0
 BEFORE_RD, AFTER_RD = "03", "04"   # 시비 前/後 회차
 
@@ -135,6 +138,18 @@ def bounds3857(path):
     with rasterio.open(path) as s:
         l, b, r, t = transform_bounds(s.crs, "EPSG:3857", *s.bounds)
     return (l, r, b, t)
+
+
+def find_rx(code):
+    """처방맵 Rx GeoTIFF. 프로젝트(result/gj_1021) → SSD 사본(_rx/) 순 탐색. 변량 필지만 존재."""
+    for base in (RX_DIR, OUT / "_rx"):
+        p = base / f"{code}.tif"
+        if p.exists():
+            return str(p)
+        g = glob.glob(str(base / f"{code}_*.tif"))
+        if g:
+            return g[0]
+    return None
 
 
 def find_tif(code, rnd, kind):
@@ -303,13 +318,14 @@ def field_page(m, rec):
     def f0(x):
         return f"{x:.0f}" if np.isfinite(x) else "-"
     dexg = (rec["exga"] - rec["exgb"]) if (np.isfinite(rec["exga"]) and np.isfinite(rec["exgb"])) else float("nan")
+    rx = find_rx(code)
     b = masked(load1(bg))
     a = masked(load1(ag))
     allv = np.concatenate([b[~np.isnan(b)], a[~np.isnan(a)]])
     lo, hi = np.percentile(allv, 3), np.percentile(allv, 98)
-    fig = plt.figure(figsize=(14, 9.3))
-    gs = gridspec.GridSpec(2, 3, height_ratios=[2.2, 1.9], hspace=0.30, wspace=0.16,
-                           left=0.04, right=0.97, top=0.82, bottom=0.04)
+    fig = plt.figure(figsize=(14, 10.6))
+    gs = gridspec.GridSpec(3, 3, height_ratios=[2.0, 1.7, 1.5], hspace=0.34, wspace=0.16,
+                           left=0.04, right=0.97, top=0.85, bottom=0.03)
     gcol = {VARIABLE: "#c0392b", UNIFORM: "#2874a6", RDA: "#1e8449", NONE_: "#7f8c8d"}[grp]
     dcv = rec["cva"] - rec["cvb"]
     verdict, vcol = verdict_of(grp, dcv, m["early"])
@@ -318,50 +334,62 @@ def field_page(m, rec):
     fig.suptitle(f"{code}  [{grp_disp}]   · 경작자 {farmer}  · {m['plan']}  · {season}", fontsize=17,
                  fontweight="bold", y=0.975, color=gcol)
     sp = f"살포 {m['spray']}" if m["spray"] and m["spray"] not in ("살포안함",) else m["dronecol"]
-    fig.text(0.5, 0.935,
+    fig.text(0.5, 0.945,
              f"CV {rec['cvb']:.1f}% → {rec['cva']:.1f}% ({dcv:+.1f}%p, {verdict})   |   "
              f"ExG(녹색도) {f0(rec['exgb'])}→{f0(rec['exga'])}   |   {sp}",
              ha="center", fontsize=12, color="#333")
-    note2 = "※ CV(고르기 편차)는 낮을수록 균일 · ΔCV 음수(-)=개선  |  前=0724/0729, 後=0811"
+    note2 = "※ CV(고르기 편차)는 낮을수록 균일 · ΔCV 음수(-)=개선  |  前=0724/0729, 後=0811  |  처방맵 진할수록(빨강) 비료 많이 처방"
     if m["early"] and grp != NONE_:
-        note2 += "  |  조기이앙 성숙 → 03시점 이미 고생육, 변화 작게 나타남"
-    fig.text(0.5, 0.90, note2, ha="center", fontsize=9.5, color="#888")
-    # row1: 前 GNDVI / 後 GNDVI / 히스토그램
+        note2 += "  |  조기이앙 성숙 → 변화 작게"
+    fig.text(0.5, 0.915, note2, ha="center", fontsize=9.2, color="#888")
+    # row1: 前 GNDVI / 처방맵(kg/ha) / 後 GNDVI  (화성 리포트와 동일)
     ax = fig.add_subplot(gs[0, 0]); ax.imshow(b, cmap=GREEN, vmin=lo, vmax=hi); ax.axis("off")
     ax.set_title("시비前 GNDVI (03회차)", fontsize=11)
-    ax = fig.add_subplot(gs[0, 1]); im = ax.imshow(a, cmap=GREEN, vmin=lo, vmax=hi); ax.axis("off")
+    ax = fig.add_subplot(gs[0, 1]); ax.axis("off"); ax.set_title("처방맵 (살포량 kg/ha)", fontsize=11)
+    if rx:
+        with rasterio.open(rx) as s:
+            rr = s.read(1).astype("float32"); rr = np.where(rr > 0, rr, np.nan)
+        im2 = ax.imshow(rr, cmap=RXCM); fig.colorbar(im2, ax=ax, fraction=0.045, pad=0.02)
+    else:
+        txt = "균등 살포\n(처방맵 없음)" if grp in (UNIFORM, RDA) else "처방맵 없음"
+        ax.text(0.5, 0.5, txt, ha="center", va="center", fontsize=12, color="#999", transform=ax.transAxes)
+    ax = fig.add_subplot(gs[0, 2]); im = ax.imshow(a, cmap=GREEN, vmin=lo, vmax=hi); ax.axis("off")
     ax.set_title("시비後 GNDVI (04회차)", fontsize=11)
     fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
-    axh = fig.add_subplot(gs[0, 2]); bins = np.linspace(0.2, 0.95, 55)
-    axh.hist(rec["vb"], bins=bins, alpha=0.55, color="#e67e22", density=True, label=f"前 {rec['cvb']:.1f}%")
-    axh.hist(rec["va"], bins=bins, alpha=0.55, color="#27ae60", density=True, label=f"後 {rec['cva']:.1f}%")
-    axh.set_title("GNDVI 분포 前/後", fontsize=10); axh.legend(fontsize=8); axh.set_yticks([])
-    axh.set_xlabel("GNDVI", fontsize=9)
-    # row2: 前 RGB / 後 RGB / 지표표
+    # row2: 前 RGB / 後 RGB / 히스토그램
     ax = fig.add_subplot(gs[1, 0]); ax.axis("off"); ax.set_title("시비前 RGB", fontsize=11)
     if br: ax.imshow(rgb_img(br))
     ax = fig.add_subplot(gs[1, 1]); ax.axis("off"); ax.set_title("시비後 RGB", fontsize=11)
     if ar: ax.imshow(rgb_img(ar))
-    axt = fig.add_subplot(gs[1, 2]); axt.axis("off")
+    axh = fig.add_subplot(gs[1, 2]); bins = np.linspace(0.2, 0.95, 55)
+    axh.hist(rec["vb"], bins=bins, alpha=0.55, color="#e67e22", density=True, label=f"前 {rec['cvb']:.1f}%")
+    axh.hist(rec["va"], bins=bins, alpha=0.55, color="#27ae60", density=True, label=f"後 {rec['cva']:.1f}%")
+    axh.set_title("GNDVI 분포 前/後", fontsize=10); axh.legend(fontsize=8); axh.set_yticks([])
+    axh.set_xlabel("GNDVI", fontsize=9)
+    # row3: 지표표 + 판정
+    axt = fig.add_subplot(gs[2, :]); axt.axis("off")
     rows = [["지표", "시비前", "시비後", "Δ"],
             ["평균 GNDVI", f"{rec['mb']:.3f}", f"{rec['ma']:.3f}", f"{rec['ma']-rec['mb']:+.3f}"],
             ["CV (균일도)", f"{rec['cvb']:.1f}%", f"{rec['cva']:.1f}%", f"{dcv:+.1f}%p"],
             ["P10 (저위)", f"{rec['p10b']:.3f}", f"{rec['p10a']:.3f}", f"{rec['p10a']-rec['p10b']:+.3f}"],
             ["저활력<0.5", f"{rec['lowb']:.1f}%", f"{rec['lowa']:.1f}%", f"{rec['lowa']-rec['lowb']:+.1f}%p"],
             ["ExG 녹색도", f0(rec['exgb']), f0(rec['exga']), (f"{dexg:+.0f}" if np.isfinite(dexg) else "-")]]
-    tb = axt.table(cellText=rows, cellLoc="center", loc="upper center", bbox=[0.0, 0.42, 1.0, 0.56])
-    tb.auto_set_font_size(False); tb.set_fontsize(9)
+    tb = axt.table(cellText=rows, cellLoc="center", loc="center", bbox=[0.0, 0.08, 0.56, 0.86])
+    tb.auto_set_font_size(False); tb.set_fontsize(9.5)
     for (rr, cc), cell in tb.get_celld().items():
         if rr == 0:
             cell.set_facecolor("#2c3e50"); cell.set_text_props(color="white", fontweight="bold")
-    axt.text(0.5, 0.34, f"■ 판정: {verdict}", ha="center", fontsize=11, transform=axt.transAxes,
+    axt.text(0.62, 0.80, f"■ 판정: {verdict}", ha="left", fontsize=12, transform=axt.transAxes,
              color=vcol, fontweight="bold")
-    axt.text(0.5, 0.24, f"P10 {rec['p10a']-rec['p10b']:+.3f} · 저활력 {rec['lowa']-rec['lowb']:+.1f}%p"
-             f"  ·  평균GNDVI {rec['mb']:.2f}→{rec['ma']:.2f}",
-             ha="center", fontsize=9.3, transform=axt.transAxes, color="#555")
+    axt.text(0.62, 0.58, f"P10 {rec['p10a']-rec['p10b']:+.3f} · 저활력 {rec['lowa']-rec['lowb']:+.1f}%p\n"
+             f"평균GNDVI {rec['mb']:.2f}→{rec['ma']:.2f}",
+             ha="left", fontsize=10, transform=axt.transAxes, color="#555", va="top")
+    if rx and grp == VARIABLE:
+        axt.text(0.62, 0.36, "※ 처방맵: 前 생육이 낮은(연한) 곳에 비료를\n   더 처방(빨강) → 均一化 의도",
+                 ha="left", fontsize=9, transform=axt.transAxes, color="#8e44ad", va="top")
     if m["early"] and grp != NONE_:
-        axt.text(0.5, 0.14, "조기이앙으로 前 이미 성숙 → 변화 작음(악화 아님)",
-                 ha="center", fontsize=8.8, transform=axt.transAxes, color="#e67e22")
+        axt.text(0.62, 0.16, "※ 조기이앙으로 前 이미 성숙 → 변화 작음(악화 아님)",
+                 ha="left", fontsize=9, transform=axt.transAxes, color="#e67e22", va="top")
     out = DET / f"{code}.png"
     fig.savefig(out, dpi=135, bbox_inches="tight"); plt.close(fig)
     return str(out)
@@ -434,8 +462,8 @@ def summary_page(recs, meta):
 def cover_page(recs, meta):
     fig = plt.figure(figsize=(11.7, 8.3)); fig.patch.set_facecolor("white")
     fig.text(0.5, 0.74, "김제 벼 변량시비 효과 분석 리포트", ha="center", fontsize=27, fontweight="bold")
-    fig.text(0.5, 0.68, "시비 前(03회차) · 시비 後(04회차, 0811) GNDVI+RGB 종합 · 균일도(CV) 검증",
-             ha="center", fontsize=13, color="#333")
+    fig.text(0.5, 0.68, "시비 前(03회차) · 처방맵(kg/ha) · 시비 後(04회차, 0811) GNDVI+RGB 종합 · 균일도(CV) 검증",
+             ha="center", fontsize=12.5, color="#333")
     fig.text(0.5, 0.605, "CV(변동계수)=논 안 생육 편차 · 낮을수록 균일 → ΔCV가 음수(-)일수록 '개선'",
              ha="center", fontsize=13, fontweight="bold", color="#1e5f2f",
              bbox=dict(boxstyle="round,pad=0.6", fc="#eafaf0", ec="#27ae60", lw=1.6))
